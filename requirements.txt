@@ -1,0 +1,17 @@
+# Schwab API
+schwab-py>=1.4.0
+
+# Data
+pandas>=2.0.0
+numpy>=1.26.0
+scipy>=1.11.0
+
+# Visualization
+plotly>=5.18.0
+matplotlib>=3.8.0
+
+# Env / config
+python-dotenv>=1.0.0
+
+# Utilities
+httpx>=0.26.0

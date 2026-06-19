@@ -1,0 +1,34 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run job.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/job.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Run job.py --first-time",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/job.py",
+            "args": ["--first-time"],
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug Session (explore data)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/debug_session.py",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

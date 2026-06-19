@@ -1,0 +1,8 @@
+[schwab]
+# Copy this file to config.ini and fill in real values.
+# config.ini is gitignored and should never be committed.
+api_key = your_client_id_here
+app_secret = your_client_secret_here
+callback_url = https://oauth.pstmn.io/v1/callback
+token_path = token.json
+timeout = 120
