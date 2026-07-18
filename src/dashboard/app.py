@@ -38,25 +38,46 @@ from src.dashboard.decision_engine import ContractFilters, ScoreWeights
 DEFAULT_SAVE_SYMBOL = "SPX"
 
 
-def _bootstrap_token_from_secret() -> None:
-    """Re-materialize token.json from a SCHWAB_TOKEN_B64 secret on cold start.
+_SECRET_ENV_KEYS = (
+    "SCHWAB_API_KEY", "SCHWAB_APP_SECRET", "SCHWAB_CALLBACK_URL",
+    "TOKEN_PATH", "SCHWAB_TIMEOUT", "SCHWAB_TOKEN_B64",
+)
 
-    Streamlit Community Cloud's disk is ephemeral, so a token produced by a
-    local `--first-time` OAuth run won't survive a redeploy/sleep-wake cycle.
-    Runs at import time (before any page renders) so the "Refresh Live Data"
-    button has a token to work with. No-ops locally, where no such secret is
-    configured and a real OAuth flow / existing token.json is used instead.
+
+def _bootstrap_secrets() -> None:
+    """Copy Schwab config from st.secrets into os.environ, then re-materialize
+    token.json from SCHWAB_TOKEN_B64 if no token is on disk yet.
+
+    SchwabAuth.from_env() (src/auth.py) reads os.environ directly and has no
+    knowledge of Streamlit -- Streamlit does not guarantee st.secrets values
+    are already mirrored into the process environment by the time this
+    module-level code runs, so copy them explicitly rather than relying on
+    that. Also handles token.json: Streamlit Community Cloud's disk is
+    ephemeral, so a token produced by a local `--first-time` OAuth run won't
+    survive a redeploy/sleep-wake cycle. Runs at import time (before any page
+    renders) so the "Refresh Live Data" button has credentials/a token to
+    work with. No-ops locally where no secrets.toml exists.
     """
     try:
-        b64 = st.secrets.get("SCHWAB_TOKEN_B64", "")
+        secrets = st.secrets
     except Exception:
-        b64 = ""
-    b64 = b64 or os.environ.get("SCHWAB_TOKEN_B64", "")
+        return
+    for key in _SECRET_ENV_KEYS:
+        if key in os.environ:
+            continue
+        try:
+            value = secrets.get(key)
+        except Exception:
+            value = None
+        if value:
+            os.environ[key] = str(value)
+
+    b64 = os.environ.get("SCHWAB_TOKEN_B64", "")
     if b64:
         write_token_from_base64(b64)
 
 
-_bootstrap_token_from_secret()
+_bootstrap_secrets()
 
 
 @dataclass
