@@ -9,6 +9,7 @@ scipy>=1.11.0
 # Visualization
 plotly>=5.18.0
 matplotlib>=3.8.0
+streamlit>=1.38.0
 
 # Env / config
 python-dotenv>=1.0.0
