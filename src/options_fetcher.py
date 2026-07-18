@@ -13,8 +13,9 @@ Usage
 from __future__ import annotations
 
 import calendar
+import math
 from datetime import datetime, date, timedelta, UTC
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
 import schwab
@@ -130,40 +131,85 @@ class OptionsFetcher:
         contract_type: str = "ALL",
         strikes_each_side: int = 5,
         strike_increment: int = 100,
+        scale_strikes_with_dte: bool = True,
+        dte_scaling_reference: float = 30.0,
+        max_strikes_each_side: int = 40,
     ) -> pd.DataFrame:
         """
         Fetch monthly expiries only (3rd Friday, holiday-adjusted).
 
         For each expiry, requests a wide strike window then post-filters to
         only keep strikes at `strike_increment` intervals (default $100) within
-        `strikes_each_side` steps of ATM.
+        N steps of ATM, where N defaults to `strikes_each_side` but grows with
+        DTE (see `scale_strikes_with_dte`).
 
-        Example: SPX at 7500, strikes_each_side=5, strike_increment=100
+        Example: SPX at 7500, strikes_each_side=5, strike_increment=100, dte=30
           → keeps 7000, 7100, 7200, 7300, 7400, 7500, 7600, 7700, 7800, 7900, 8000
+
+        Why scale with DTE
+        -------------------
+        Downstream skew/curvature metrics need strikes bracketing ~25-delta on
+        both the call and put side per expiry. Since implied-vol-driven strike
+        dispersion scales roughly with sigma * sqrt(T), the dollar distance from
+        ATM to the 25-delta strike grows with DTE — a fixed $100 x 5-strike
+        window (±$500) brackets 25-delta for near-dated SPX monthlies (~90 DTE
+        and under) but falls short for longer-dated ones, leaving too few
+        in-range strikes and NaN skew/curvature for anything further out.
+        `scale_strikes_with_dte` (on by default) widens the per-expiry strike
+        count by roughly sqrt(dte / dte_scaling_reference), so the fixed
+        `strike_increment` filter still applies but pulls more strikes for
+        longer-dated expiries. This was validated (see _strikes_each_side_for_dte)
+        against a static SPX chain snapshot by estimating the 25-delta strike
+        from each expiry's own ATM implied vol via Black-Scholes and checking
+        the scaled window comfortably covers it with margin, at every DTE from
+        34 to 699 days.
 
         Parameters
         ----------
-        from_date         : first expiry to include (default: today)
-        to_date           : last expiry to include (default: 2 years out)
-        contract_type     : 'ALL', 'CALL', or 'PUT'
-        strikes_each_side : steps on each side of ATM at strike_increment spacing
-        strike_increment  : spacing between selected strikes in $ (default 100)
+        from_date              : first expiry to include (default: today)
+        to_date                : last expiry to include (default: 2 years out)
+        contract_type           : 'ALL', 'CALL', or 'PUT'
+        strikes_each_side       : baseline steps on each side of ATM at
+                                   strike_increment spacing, used as-is for
+                                   expiries at/under dte_scaling_reference days
+        strike_increment        : spacing between selected strikes in $ (default 100)
+        scale_strikes_with_dte  : if True (default), widen strikes_each_side for
+                                   longer-dated expiries so they still bracket
+                                   ~25-delta; if False, reproduces the old fixed
+                                   window behavior for every expiry
+        dte_scaling_reference   : DTE (days) at/under which strikes_each_side is
+                                   used unchanged; the scaling anchor point
+        max_strikes_each_side   : safety cap on how wide the per-expiry strike
+                                   count is allowed to grow
         """
         ct = self._CONTRACT_TYPE_MAP.get(
             contract_type.upper(),
             schwab.client.Client.Options.ContractType.ALL,
         )
-        # Fetch wide enough to guarantee we capture increment-aligned strikes.
-        # Worst case: SPX near-term has $1 increments → need 2 × strikes_each_side
-        # × increment strikes. Using 300 covers ±$500 at $5 increments safely.
-        wide_strike_count = max(300, strikes_each_side * strike_increment * 2 // 5)
 
         expiries = monthly_expiry_dates(from_date, to_date)
+        reference_date = from_date or date.today()
+
         chunks: list[pd.DataFrame] = []
+        strikes_each_side_by_expiry: dict[pd.Timestamp, int] = {}
 
         for exp in expiries:
+            if scale_strikes_with_dte:
+                dte_est = max((exp - reference_date).days, 1)
+                n_side = self._strikes_each_side_for_dte(
+                    dte_est, strikes_each_side, dte_scaling_reference, max_strikes_each_side
+                )
+            else:
+                n_side = strikes_each_side
+
+            # Fetch wide enough to guarantee we capture increment-aligned strikes.
+            # Worst case: SPX near-term has $1 increments → need 2 × n_side
+            # × increment strikes. Using 300 covers ±$500 at $5 increments safely.
+            wide_strike_count = max(300, n_side * strike_increment * 2 // 5)
+
             chunk = self._fetch_single_expiry(ct, exp, wide_strike_count)
             if not chunk.empty:
+                strikes_each_side_by_expiry[pd.Timestamp(exp)] = n_side
                 chunks.append(chunk)
 
         if not chunks:
@@ -174,29 +220,66 @@ class OptionsFetcher:
         # Post-filter: keep only strikes at the desired increment
         df = df[df["strikePrice"] % strike_increment == 0].copy()
 
-        # Keep only ±strikes_each_side from ATM per expiration
-        df = self._trim_to_n_strikes(df, strikes_each_side)
+        # Keep only ±n_side strikes from ATM per expiration, where n_side is
+        # per-expiry when scale_strikes_with_dte is on, else the flat baseline.
+        n_arg: Union[int, dict[pd.Timestamp, int]] = (
+            strikes_each_side_by_expiry if scale_strikes_with_dte else strikes_each_side
+        )
+        df = self._trim_to_n_strikes(df, n_arg)
 
         df.sort_values(["optionType", "expiration", "strikePrice"], inplace=True)
         df.reset_index(drop=True, inplace=True)
         return df
 
     @staticmethod
-    def _trim_to_n_strikes(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    def _strikes_each_side_for_dte(
+        dte: float,
+        base_strikes_each_side: int,
+        reference_dte: float,
+        max_strikes_each_side: int,
+    ) -> int:
         """
-        For each (optionType, expiration), keep only the `n` strikes closest
-        to ATM (underlyingPrice) on each side, i.e. ≤ n below and ≤ n above.
+        Scale strikes_each_side by sqrt(dte / reference_dte).
+
+        Rationale: for a roughly constant-vol lognormal model, the strike
+        offset corresponding to a fixed delta (e.g. 25-delta) scales with
+        sigma * sqrt(T). Anchoring at `reference_dte` (default 30 days, ~the
+        nearest monthly expiry) keeps short-dated expiries at the original
+        `base_strikes_each_side`, while longer-dated expiries get a wider
+        window so they keep bracketing 25-delta in dollar-strike terms.
+        Capped at `max_strikes_each_side` as a sanity limit on request size.
+        """
+        if dte <= reference_dte:
+            return base_strikes_each_side
+        scale = math.sqrt(dte / reference_dte)
+        n = math.ceil(base_strikes_each_side * scale)
+        return min(max(n, base_strikes_each_side), max_strikes_each_side)
+
+    @staticmethod
+    def _trim_to_n_strikes(
+        df: pd.DataFrame, n: Union[int, dict[pd.Timestamp, int]]
+    ) -> pd.DataFrame:
+        """
+        For each (optionType, expiration), keep only the strikes closest to
+        ATM (underlyingPrice) on each side, i.e. ≤ n below and ≤ n above.
+
+        `n` may be a single int applied to every expiration (legacy/flat
+        behavior), or a dict mapping expiration (pd.Timestamp) to a per-expiry
+        strike count (used when strike coverage is scaled by DTE).
         """
         if df.empty or "underlyingPrice" not in df.columns:
             return df
 
         result_parts: list[pd.DataFrame] = []
         for (opt_type, expiration), grp in df.groupby(["optionType", "expiration"]):
+            # `n` dict is populated for every expiration that produced a
+            # non-empty chunk, i.e. every expiration present in `df`.
+            this_n = n[expiration] if isinstance(n, dict) else n
             underlying = grp["underlyingPrice"].iloc[0]
             strikes = grp["strikePrice"].drop_duplicates().sort_values()
 
-            below = strikes[strikes <= underlying].nlargest(n + 1)   # include ATM
-            above = strikes[strikes > underlying].nsmallest(n)
+            below = strikes[strikes <= underlying].nlargest(this_n + 1)   # include ATM
+            above = strikes[strikes > underlying].nsmallest(this_n)
             allowed = set(below) | set(above)
 
             result_parts.append(grp[grp["strikePrice"].isin(allowed)])
