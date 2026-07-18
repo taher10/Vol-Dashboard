@@ -16,6 +16,7 @@ Usage
 
 from __future__ import annotations
 
+import base64
 import configparser
 import os
 from pathlib import Path
@@ -26,6 +27,29 @@ import httpx
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.ini"
+
+
+def write_token_from_base64(b64_token: str, token_path: str | Path | None = None) -> Path:
+    """
+    Decode a base64-encoded token.json (produced locally via `base64 -i
+    token.json` after a one-time `--first-time` OAuth run) and write it to
+    disk, but only if no token file exists there yet.
+
+    For hosts with ephemeral storage (e.g. Streamlit Community Cloud),
+    token.json from a local first-time auth doesn't survive a redeploy/cold
+    start. Stashing its base64 contents as a secret and calling this on app
+    startup re-materializes it without needing a browser-based OAuth flow on
+    the server itself. Never overwrites an existing token -- schwab-py
+    refreshes it in place, so a live token on disk is newer than the secret.
+    """
+    path = Path(token_path) if token_path else Path(os.environ.get("TOKEN_PATH", "token.json"))
+    if not path.is_absolute():
+        path = _PROJECT_ROOT / path
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(base64.b64decode(b64_token))
+    return path
 
 
 class SchwabAuth:

@@ -15,6 +15,7 @@ does NOT re-render the Overview page's content.
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,11 +30,33 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 
+from src.auth import write_token_from_base64
 from src.dashboard import chart_components, data_loader, decision_engine
 from src.dashboard.data_loader import SnapshotBundle
 from src.dashboard.decision_engine import ContractFilters, ScoreWeights
 
 DEFAULT_SAVE_SYMBOL = "SPX"
+
+
+def _bootstrap_token_from_secret() -> None:
+    """Re-materialize token.json from a SCHWAB_TOKEN_B64 secret on cold start.
+
+    Streamlit Community Cloud's disk is ephemeral, so a token produced by a
+    local `--first-time` OAuth run won't survive a redeploy/sleep-wake cycle.
+    Runs at import time (before any page renders) so the "Refresh Live Data"
+    button has a token to work with. No-ops locally, where no such secret is
+    configured and a real OAuth flow / existing token.json is used instead.
+    """
+    try:
+        b64 = st.secrets.get("SCHWAB_TOKEN_B64", "")
+    except Exception:
+        b64 = ""
+    b64 = b64 or os.environ.get("SCHWAB_TOKEN_B64", "")
+    if b64:
+        write_token_from_base64(b64)
+
+
+_bootstrap_token_from_secret()
 
 
 @dataclass

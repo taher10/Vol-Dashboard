@@ -2,6 +2,7 @@
 .env
 config.ini
 token.json
+.streamlit/secrets.toml
 
 # Data files (can be large)
 data/raw/
