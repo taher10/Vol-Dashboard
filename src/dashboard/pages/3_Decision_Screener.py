@@ -21,7 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from src.dashboard import chart_components, decision_engine
-from src.dashboard.app import get_expiry_scores, load_snapshot_safely, render_sidebar, richness_table_safe
+from src.dashboard.app import get_expiry_scores, load_snapshot_safely, render_sidebar
 
 st.set_page_config(page_title="Decision Screener", layout="wide")
 
@@ -57,7 +57,7 @@ if expiry_scores is not None:
         if display_scores.empty:
             st.info(f"No expiries are currently labeled '{intent_richness}'.")
     st.plotly_chart(
-        chart_components.expiry_richness_table_style(richness_table_safe(display_scores)),
+        chart_components.expiry_richness_table_style(display_scores),
         use_container_width=True,
     )
 

@@ -87,23 +87,6 @@ def load_snapshot_safely(save_symbol: str) -> SnapshotBundle | None:
         return None
 
 
-def richness_table_safe(df: pd.DataFrame | None) -> pd.DataFrame | None:
-    """
-    Workaround for a bug in chart_components.expiry_richness_table_style():
-    its cell formatter unconditionally does float(val) for a "skew_bias"
-    column, but decision_engine.score_expiries() populates skew_bias with
-    string labels ("Puts richer" / "Calls richer" / "Balanced"), never
-    numbers -- so passing its output straight through raises a ValueError.
-    chart_components.py is a sibling module we must not edit, so every call
-    site here drops the offending column first; skew_bias is still shown
-    elsewhere (e.g. the Expiry Drilldown page's caption) via plain string
-    formatting, which doesn't hit this bug.
-    """
-    if df is None:
-        return None
-    return df.drop(columns=["skew_bias"], errors="ignore")
-
-
 def get_expiry_scores(metrics: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
     """Wraps decision_engine.score_expiries() with a friendly fallback when
     the required 'term_structure' metric is missing (score_expiries raises
@@ -274,7 +257,7 @@ def render_overview(config: AppConfig) -> None:
     expiry_scores = get_expiry_scores(bundle.metrics)
     if expiry_scores is not None:
         st.plotly_chart(
-            chart_components.expiry_richness_table_style(richness_table_safe(expiry_scores)),
+            chart_components.expiry_richness_table_style(expiry_scores),
             use_container_width=True,
         )
 
