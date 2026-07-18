@@ -335,7 +335,7 @@ def expiry_richness_table_style(df: pd.DataFrame) -> go.Figure:
             return str(val)
         if col == "dte":
             return f"{int(val)}"
-        if col in ("atm_iv", "vrp", "vrp_z", "skew_bias"):
+        if col in ("atm_iv", "vrp", "vrp_z"):
             return f"{float(val):.3f}"
         if col == "has_wing_data":
             return "Yes" if bool(val) else "No wing data"
