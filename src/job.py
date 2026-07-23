@@ -66,6 +66,16 @@ class OptionsVolJob:
                         Pass None for individual equities, where a single
                         fixed increment doesn't fit every underlying's price
                         level -- see options_fetcher.fetch_monthly_chain.
+    strikes_each_side : baseline strike count on each side of ATM (default 5,
+                        validated for SPX at $100 spacing -- covers 25-delta
+                        comfortably there). Equities need this much larger
+                        (empirically 20 reliably brackets 25-delta even for
+                        GOOGL/TSLA, the tightest cases found) since a fixed
+                        strike COUNT spans a much smaller $ distance from ATM
+                        at an equity's tighter native strike spacing, and
+                        skew/curvature need real quotes bracketing 25-delta
+                        on both sides or they're correctly left NaN rather
+                        than extrapolated.
     """
 
     def __init__(
@@ -76,12 +86,14 @@ class OptionsVolJob:
         rv_window: int = 21,
         data_dir: Optional[Path] = None,
         strike_increment: Optional[int] = 100,
+        strikes_each_side: int = 5,
     ) -> None:
         self.symbol = symbol
         self.save_symbol = save_symbol
         self.target_delta = target_delta
         self.rv_window = rv_window
         self.strike_increment = strike_increment
+        self.strikes_each_side = strikes_each_side
         self._auth = SchwabAuth.from_env()
         # CSVStore uses a day-based filename key, so reruns on the same UTC day overwrite.
         self._store = CSVStore(symbol=save_symbol, base_dir=data_dir)
@@ -108,8 +120,10 @@ class OptionsVolJob:
         # 2. Fetch
         fetcher = OptionsFetcher(client, symbol=self.symbol)
 
-        logger.info("Fetching monthly options chain (±5 strikes ATM per expiry) ...")
-        chain = fetcher.fetch_monthly_chain(strikes_each_side=5, strike_increment=self.strike_increment)
+        logger.info("Fetching monthly options chain (±%d strikes ATM per expiry) ...", self.strikes_each_side)
+        chain = fetcher.fetch_monthly_chain(
+            strikes_each_side=self.strikes_each_side, strike_increment=self.strike_increment
+        )
         logger.info("Chain: %d contracts, %d expirations",
                     len(chain), chain["expiration"].nunique())
 
@@ -225,6 +239,11 @@ def _build_parser() -> argparse.ArgumentParser:
              "(recommended for individual equities, which don't share SPX's $100 spacing)",
     )
     p.add_argument(
+        "--strikes-each-side", type=int, default=5,
+        help="Baseline strike count on each side of ATM (validated default 5 is for SPX; "
+             "equities need this much larger, e.g. 20, to bracket 25-delta for skew/curvature)",
+    )
+    p.add_argument(
         "--first-time",
         action="store_true",
         help="Run OAuth browser flow (first-time setup only)",
@@ -246,6 +265,7 @@ if __name__ == "__main__":
         target_delta=args.delta,
         rv_window=args.rv_window,
         strike_increment=None if args.no_strike_filter else args.strike_increment,
+        strikes_each_side=args.strikes_each_side,
     )
 
     if args.first_time:

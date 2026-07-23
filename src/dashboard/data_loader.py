@@ -112,7 +112,10 @@ def list_snapshot_dates(save_symbol: str = "SPX") -> list[date]:
 
 
 def trigger_live_refresh(
-    api_symbol: str = "$SPX", save_symbol: str = "SPX", strike_increment: int | None = 100
+    api_symbol: str = "$SPX",
+    save_symbol: str = "SPX",
+    strike_increment: int | None = 100,
+    strikes_each_side: int = 5,
 ) -> SnapshotBundle:
     """
     Run the full live pipeline (auth → fetch → save → compute metrics) via
@@ -122,10 +125,17 @@ def trigger_live_refresh(
     token.json) are intentionally left to propagate unmodified — the
     Streamlit UI layer is responsible for catching and displaying them.
 
-    strike_increment is passed straight through to OptionsVolJob -- pass
-    None for equities (see options_fetcher.fetch_monthly_chain), the
-    validated $100 default is SPX-specific.
+    strike_increment/strikes_each_side are passed straight through to
+    OptionsVolJob -- pass strike_increment=None and a much larger
+    strikes_each_side (e.g. 20) for equities, whose tighter native strike
+    spacing means SPX's validated defaults (100 / 5) don't reach 25-delta.
+    See options_fetcher.fetch_monthly_chain.
     """
-    job = OptionsVolJob(symbol=api_symbol, save_symbol=save_symbol, strike_increment=strike_increment)
+    job = OptionsVolJob(
+        symbol=api_symbol,
+        save_symbol=save_symbol,
+        strike_increment=strike_increment,
+        strikes_each_side=strikes_each_side,
+    )
     job.run()
     return load_latest_snapshot(save_symbol)
