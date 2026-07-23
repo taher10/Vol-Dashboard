@@ -131,6 +131,29 @@ def load_snapshot_safely(save_symbol: str) -> SnapshotBundle | None:
         return None
 
 
+def _filter_metrics_by_dte(
+    metrics: dict[str, pd.DataFrame], dte_range: tuple[int, int]
+) -> dict[str, pd.DataFrame]:
+    """Restrict every per-expiry metric DataFrame to the sidebar's DTE range.
+
+    Overview's charts/table previously ignored the "Contract Filters" DTE
+    range entirely (it was only ever read by the Decision Screener page for
+    contract-level scoring), so narrowing it had no visible effect there --
+    this makes every page respect the same control. richness_label/skew_bias
+    z-scores in score_expiries() are computed *after* this filter runs, so
+    "rich/cheap relative to other expiries on offer" means relative to the
+    expiries actually in view, not the full 2-year window.
+    """
+    lo, hi = dte_range
+    filtered: dict[str, pd.DataFrame] = {}
+    for name, df in metrics.items():
+        if df is not None and not df.empty and "dte" in df.columns:
+            filtered[name] = df[(df["dte"] >= lo) & (df["dte"] <= hi)]
+        else:
+            filtered[name] = df
+    return filtered
+
+
 def get_expiry_scores(metrics: dict[str, pd.DataFrame]) -> pd.DataFrame | None:
     """Wraps decision_engine.score_expiries() with a friendly fallback when
     the required 'term_structure' metric is missing (score_expiries raises
@@ -264,11 +287,13 @@ def render_overview(config: AppConfig) -> None:
     if bundle is None:
         return
 
-    st.caption(f"As of {bundle.as_of}")
+    st.caption(f"As of {bundle.as_of}  ·  showing expiries {config.filters.dte_range[0]}–{config.filters.dte_range[1]} DTE")
 
-    term_df = bundle.metrics.get("term_structure", pd.DataFrame())
-    skew_df = bundle.metrics.get("skew", pd.DataFrame())
-    curvature_df = bundle.metrics.get("curvature", pd.DataFrame())
+    metrics = _filter_metrics_by_dte(bundle.metrics, config.filters.dte_range)
+
+    term_df = metrics.get("term_structure", pd.DataFrame())
+    skew_df = metrics.get("skew", pd.DataFrame())
+    curvature_df = metrics.get("curvature", pd.DataFrame())
 
     col1, col2 = st.columns(2)
     with col1:
@@ -289,20 +314,29 @@ def render_overview(config: AppConfig) -> None:
             use_container_width=True,
         )
     with col4:
-        if "vrp" in bundle.metrics:
+        if "vrp" in metrics:
             st.plotly_chart(
-                chart_components.vrp_chart(bundle.metrics["vrp"], symbol=config.save_symbol),
+                chart_components.vrp_chart(metrics["vrp"], symbol=config.save_symbol),
                 use_container_width=True,
             )
         else:
             st.info("VRP metric unavailable for this snapshot (needs price history at save time).")
 
     st.subheader("Expiry Richness")
-    expiry_scores = get_expiry_scores(bundle.metrics)
+    expiry_scores = get_expiry_scores(metrics)
     if expiry_scores is not None:
         st.plotly_chart(
             chart_components.expiry_richness_table_style(expiry_scores),
             use_container_width=True,
+        )
+        st.caption(
+            "**IV Richness** compares this expiry's implied vol to its own realized "
+            "vol, ranked against the other expiries currently in view — *Rich* means "
+            "options here are priced expensive (favors selling premium), *Cheap* "
+            "means priced inexpensive (favors buying). **Put/Call Skew** is a "
+            "separate signal: within this expiry's smile, which side (puts or "
+            "calls) is priced richer relative to the other — it says nothing about "
+            "whether the expiry as a whole is rich or cheap."
         )
 
 

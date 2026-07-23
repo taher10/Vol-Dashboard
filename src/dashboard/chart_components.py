@@ -102,15 +102,31 @@ def _line_metric_chart(
     y_title: str,
     color: str,
     zero_line: bool = False,
+    dte_col: str = "dte",
 ) -> go.Figure:
     """Shared builder behind term_structure/skew/curvature/vrp — same mark spec
     (2px line, marker, optional zero baseline) with each public function only
     varying title/column/color, matching MetricsChartBuilder's one-chart-per-
-    metric shape without repeating the plumbing four times."""
+    metric shape without repeating the plumbing four times.
+
+    x_col is the expiration date (not DTE) so the axis reads in calendar
+    terms -- traders think "the September expiry", not "DTE 57" -- with
+    quarterly tick labels since the term structure spans up to two years.
+    DTE is kept one click away via customdata in the hover tooltip rather
+    than dropped, since it's still the more precise value for comparing
+    expiries.
+    """
     if not _has_usable_data(df, [x_col, y_col]):
         return _empty_figure(title)
 
-    plot_df = df[[x_col, y_col]].dropna().sort_values(x_col)
+    has_dte = dte_col in df.columns
+    cols = [x_col, y_col] + ([dte_col] if has_dte else [])
+    plot_df = df[cols].dropna(subset=[x_col, y_col]).sort_values(x_col)
+
+    hovertemplate = "%{x|%b %d, %Y}"
+    if has_dte:
+        hovertemplate += "<br>DTE %{customdata}"
+    hovertemplate += f"<br>{y_title} %{{y:.3f}}<extra></extra>"
 
     fig = go.Figure()
     fig.add_trace(
@@ -121,7 +137,8 @@ def _line_metric_chart(
             line={"width": 2, "color": color},
             marker={"size": 8, "color": color, "line": {"width": 2, "color": "#fcfcfb"}},
             name=y_title,
-            hovertemplate=f"DTE %{{x}}<br>{y_title} %{{y:.3f}}<extra></extra>",
+            customdata=plot_df[dte_col] if has_dte else None,
+            hovertemplate=hovertemplate,
         )
     )
     if zero_line:
@@ -130,12 +147,12 @@ def _line_metric_chart(
     fig.update_layout(
         template=TEMPLATE,
         title=title,
-        xaxis_title="DTE",
+        xaxis_title="Expiration",
         yaxis_title=y_title,
         showlegend=False,
         margin={"t": 60, "b": 40, "l": 60, "r": 30},
     )
-    fig.update_xaxes(gridcolor=COLOR_GRID, zeroline=False)
+    fig.update_xaxes(gridcolor=COLOR_GRID, zeroline=False, dtick="M3", tickformat="%b '%y")
     fig.update_yaxes(gridcolor=COLOR_GRID, zeroline=False)
     return fig
 
@@ -145,10 +162,10 @@ def _line_metric_chart(
 # ---------------------------------------------------------------------------
 
 def term_structure_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
-    """Line+marker chart: x=dte, y=atm_iv."""
+    """Line+marker chart: x=expiration (quarterly ticks), y=atm_iv."""
     return _line_metric_chart(
         df,
-        x_col="dte",
+        x_col="expiration",
         y_col="atm_iv",
         title=f"{symbol} ATM IV Term Structure",
         y_title="ATM IV (%)",
@@ -157,10 +174,10 @@ def term_structure_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Fig
 
 
 def skew_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
-    """Line+marker chart: x=dte, y=skew, with a horizontal zero reference line."""
+    """Line+marker chart: x=expiration (quarterly ticks), y=skew, with a horizontal zero reference line."""
     return _line_metric_chart(
         df,
-        x_col="dte",
+        x_col="expiration",
         y_col="skew",
         title=f"{symbol} 25D Put-Call Skew",
         y_title="Skew (IV points)",
@@ -170,10 +187,10 @@ def skew_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
 
 
 def curvature_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
-    """Line+marker chart: x=dte, y=curvature, with a horizontal zero reference line."""
+    """Line+marker chart: x=expiration (quarterly ticks), y=curvature, with a horizontal zero reference line."""
     return _line_metric_chart(
         df,
-        x_col="dte",
+        x_col="expiration",
         y_col="curvature",
         title=f"{symbol} Smile Curvature",
         y_title="Curvature (IV points)",
@@ -183,10 +200,10 @@ def curvature_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
 
 
 def vrp_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
-    """Line+marker chart: x=dte, y=vrp, with a horizontal zero reference line."""
+    """Line+marker chart: x=expiration (quarterly ticks), y=vrp, with a horizontal zero reference line."""
     return _line_metric_chart(
         df,
-        x_col="dte",
+        x_col="expiration",
         y_col="vrp",
         title=f"{symbol} Volatility Risk Premium",
         y_title="VRP (IV - RV)",
@@ -345,10 +362,10 @@ def expiry_richness_table_style(df: pd.DataFrame) -> go.Figure:
         "expiration": "Expiration",
         "dte": "DTE",
         "atm_iv": "ATM IV",
-        "vrp": "VRP",
-        "vrp_z": "VRP Z",
-        "richness_label": "Richness",
-        "skew_bias": "Skew Bias",
+        "vrp": "VRP (IV−RV)",
+        "vrp_z": "VRP Z-score",
+        "richness_label": "IV Richness",
+        "skew_bias": "Put/Call Skew",
         "has_wing_data": "Wing Data",
     }
 
