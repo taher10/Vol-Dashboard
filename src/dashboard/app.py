@@ -38,6 +38,45 @@ from src.dashboard.decision_engine import ContractFilters, ScoreWeights
 DEFAULT_SAVE_SYMBOL = "SPX"
 
 
+@dataclass(frozen=True)
+class SymbolInfo:
+    """Registry entry for a symbol the sidebar can select.
+
+    api_symbol       : exact string Schwab's API expects. Indices need a
+                        "$" prefix (e.g. "$SPX"); equities don't ("AAPL").
+                        Auto-prepending "$" to every symbol (the old
+                        behavior) silently broke every non-index ticker.
+    strike_increment : passed through to fetch_monthly_chain's post-fetch
+                        strike filter. SPX is validated at $100 spacing;
+                        None skips that filter for equities, since a single
+                        fixed increment doesn't fit stocks at very different
+                        price levels the way $100 fits SPX.
+    color            : fixed per symbol identity (not per selection order),
+                        so a symbol's line color is stable across sessions
+                        and re-renders -- slot 1 (SPX, blue) matches the
+                        app's pre-existing single-symbol default color.
+                        Order/hues from the dataviz skill's validated
+                        8-color categorical palette (references/palette.md),
+                        used unmodified.
+    """
+
+    api_symbol: str
+    strike_increment: int | None
+    color: str
+
+
+SYMBOL_REGISTRY: dict[str, SymbolInfo] = {
+    "SPX":   SymbolInfo("$SPX", 100, "#2a78d6"),   # slot 1 blue
+    "AAPL":  SymbolInfo("AAPL", None, "#eb6834"),  # slot 2 orange
+    "MSFT":  SymbolInfo("MSFT", None, "#1baf7a"),  # slot 3 aqua
+    "GOOGL": SymbolInfo("GOOGL", None, "#eda100"), # slot 4 yellow
+    "AMZN":  SymbolInfo("AMZN", None, "#e87ba4"),  # slot 5 magenta
+    "NVDA":  SymbolInfo("NVDA", None, "#008300"),  # slot 6 green
+    "META":  SymbolInfo("META", None, "#4a3aa7"),  # slot 7 violet
+    "TSLA":  SymbolInfo("TSLA", None, "#e34948"),  # slot 8 red
+}
+
+
 _SECRET_ENV_KEYS = (
     "SCHWAB_API_KEY", "SCHWAB_APP_SECRET", "SCHWAB_CALLBACK_URL",
     "TOKEN_PATH", "SCHWAB_TIMEOUT", "SCHWAB_TOKEN_B64",
@@ -84,7 +123,8 @@ _bootstrap_secrets()
 class AppConfig:
     """Shared sidebar settings, agreed on by every page via st.session_state."""
 
-    save_symbol: str
+    save_symbols: tuple[str, ...]  # every symbol picked in the sidebar (>=1); Overview overlays all of them
+    save_symbol: str               # save_symbols[0] -- used by the single-symbol pages (Drilldown/Strike Selector/Decision Screener) and the Expiry Richness table
     intent: Literal["buy", "sell"]
     target_delta: float
     delta_tolerance: float
@@ -180,19 +220,20 @@ def render_sidebar() -> AppConfig:
     session_state across pages)."""
     st.sidebar.header("Dashboard Settings")
 
-    save_symbol = (
-        st.sidebar.text_input(
-            "Save symbol",
-            value=DEFAULT_SAVE_SYMBOL,
-            key="cfg_save_symbol",
-            help="Symbol snapshots are stored/loaded under (e.g. SPX).",
-        )
-        .strip()
-        .upper()
-        or DEFAULT_SAVE_SYMBOL
+    save_symbols_selected = st.sidebar.multiselect(
+        "Symbols",
+        options=list(SYMBOL_REGISTRY.keys()),
+        default=[DEFAULT_SAVE_SYMBOL],
+        key="cfg_save_symbols",
+        help="Pick one symbol for the normal single-symbol view, or several to "
+        "overlay them on the Overview charts. The first symbol picked is used "
+        "for the Expiry Drilldown / Strike Selector / Decision Screener pages "
+        "and the Expiry Richness table.",
     )
+    save_symbols = tuple(save_symbols_selected) or (DEFAULT_SAVE_SYMBOL,)
+    save_symbol = save_symbols[0]
 
-    st.sidebar.caption("Saved snapshot dates (informational only)")
+    st.sidebar.caption(f"Saved snapshot dates for {save_symbol} (informational only)")
     try:
         snap_dates = data_loader.list_snapshot_dates(save_symbol)
     except Exception:
@@ -204,25 +245,38 @@ def render_sidebar() -> AppConfig:
         st.sidebar.text("No snapshots saved yet.")
 
     if st.sidebar.button("Refresh Live Data", use_container_width=True):
-        api_symbol = save_symbol if save_symbol.startswith("$") else f"${save_symbol}"
-        try:
-            with st.spinner("Fetching live data from Schwab..."):
-                data_loader.trigger_live_refresh(api_symbol=api_symbol, save_symbol=save_symbol)
-        except FileNotFoundError as exc:
-            st.sidebar.error(
-                f"Live refresh failed: {exc}\n\n"
-                f"If this is your first time running the dashboard, set up "
-                f"authentication first: `python -m src.job --first-time`."
-            )
-        except Exception as exc:
-            st.sidebar.error(
-                f"Live refresh failed: {exc}\n\n"
-                f"If this looks like a missing token/config issue, run "
-                f"`python -m src.job --first-time` from a terminal."
-            )
-        else:
+        succeeded: list[str] = []
+        failed: list[tuple[str, str]] = []
+        with st.spinner(f"Fetching live data from Schwab for {', '.join(save_symbols)}..."):
+            for sym in save_symbols:
+                info = SYMBOL_REGISTRY.get(sym)
+                if info is None:
+                    failed.append((sym, "not in the known symbol registry"))
+                    continue
+                try:
+                    data_loader.trigger_live_refresh(
+                        api_symbol=info.api_symbol,
+                        save_symbol=sym,
+                        strike_increment=info.strike_increment,
+                    )
+                    succeeded.append(sym)
+                except FileNotFoundError as exc:
+                    failed.append((
+                        sym,
+                        f"{exc} If this is your first time running the dashboard, set up "
+                        f"authentication first: `python -m src.job --first-time`.",
+                    ))
+                except Exception as exc:
+                    failed.append((
+                        sym,
+                        f"{exc} If this looks like a missing token/config issue, run "
+                        f"`python -m src.job --first-time` from a terminal.",
+                    ))
+        for sym, msg in failed:
+            st.sidebar.error(f"**{sym}** live refresh failed: {msg}")
+        if succeeded:
             st.cache_data.clear()
-            st.sidebar.success("Refreshed.")
+            st.sidebar.success(f"Refreshed: {', '.join(succeeded)}.")
             st.rerun()
 
     st.sidebar.divider()
@@ -266,6 +320,7 @@ def render_sidebar() -> AppConfig:
     )
 
     return AppConfig(
+        save_symbols=save_symbols,
         save_symbol=save_symbol,
         intent=intent,
         target_delta=float(target_delta),
@@ -283,47 +338,105 @@ def render_sidebar() -> AppConfig:
 def render_overview(config: AppConfig) -> None:
     st.title("Options Vol Dashboard — Overview")
 
-    bundle = load_snapshot_safely(config.save_symbol)
-    if bundle is None:
+    bundles: dict[str, SnapshotBundle] = {}
+    for sym in config.save_symbols:
+        bundle = load_snapshot_safely(sym)
+        if bundle is not None:
+            bundles[sym] = bundle
+    if not bundles:
         return
 
-    st.caption(f"As of {bundle.as_of}  ·  showing expiries {config.filters.dte_range[0]}–{config.filters.dte_range[1]} DTE")
+    primary = config.save_symbol
+    as_of_source = primary if primary in bundles else next(iter(bundles))
+    symbol_note = f"  ·  {len(bundles)}/{len(config.save_symbols)} symbols loaded" if len(config.save_symbols) > 1 else ""
+    st.caption(
+        f"As of {bundles[as_of_source].as_of}  ·  showing expiries "
+        f"{config.filters.dte_range[0]}–{config.filters.dte_range[1]} DTE{symbol_note}"
+    )
 
-    metrics = _filter_metrics_by_dte(bundle.metrics, config.filters.dte_range)
+    filtered_metrics: dict[str, dict[str, pd.DataFrame]] = {
+        sym: _filter_metrics_by_dte(bundle.metrics, config.filters.dte_range)
+        for sym, bundle in bundles.items()
+    }
 
-    term_df = metrics.get("term_structure", pd.DataFrame())
-    skew_df = metrics.get("skew", pd.DataFrame())
-    curvature_df = metrics.get("curvature", pd.DataFrame())
+    if len(config.save_symbols) == 1:
+        # Single symbol: keep the original per-symbol chart titles/no-legend
+        # layout rather than the overlay variant's generic titles + legend.
+        metrics = filtered_metrics.get(primary, {})
+        term_df = metrics.get("term_structure", pd.DataFrame())
+        skew_df = metrics.get("skew", pd.DataFrame())
+        curvature_df = metrics.get("curvature", pd.DataFrame())
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.plotly_chart(
-            chart_components.term_structure_chart(term_df, symbol=config.save_symbol),
-            use_container_width=True,
-        )
-    with col2:
-        st.plotly_chart(
-            chart_components.skew_chart(skew_df, symbol=config.save_symbol),
-            use_container_width=True,
-        )
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.plotly_chart(
-            chart_components.curvature_chart(curvature_df, symbol=config.save_symbol),
-            use_container_width=True,
-        )
-    with col4:
-        if "vrp" in metrics:
+        col1, col2 = st.columns(2)
+        with col1:
             st.plotly_chart(
-                chart_components.vrp_chart(metrics["vrp"], symbol=config.save_symbol),
+                chart_components.term_structure_chart(term_df, symbol=primary),
                 use_container_width=True,
             )
-        else:
-            st.info("VRP metric unavailable for this snapshot (needs price history at save time).")
+        with col2:
+            st.plotly_chart(
+                chart_components.skew_chart(skew_df, symbol=primary),
+                use_container_width=True,
+            )
 
-    st.subheader("Expiry Richness")
-    expiry_scores = get_expiry_scores(metrics)
+        col3, col4 = st.columns(2)
+        with col3:
+            st.plotly_chart(
+                chart_components.curvature_chart(curvature_df, symbol=primary),
+                use_container_width=True,
+            )
+        with col4:
+            if "vrp" in metrics:
+                st.plotly_chart(
+                    chart_components.vrp_chart(metrics["vrp"], symbol=primary),
+                    use_container_width=True,
+                )
+            else:
+                st.info("VRP metric unavailable for this snapshot (needs price history at save time).")
+    else:
+        colors = {sym: SYMBOL_REGISTRY[sym].color for sym in config.save_symbols if sym in SYMBOL_REGISTRY}
+        term_data = {sym: m.get("term_structure", pd.DataFrame()) for sym, m in filtered_metrics.items()}
+        skew_data = {sym: m.get("skew", pd.DataFrame()) for sym, m in filtered_metrics.items()}
+        curvature_data = {sym: m.get("curvature", pd.DataFrame()) for sym, m in filtered_metrics.items()}
+        vrp_data = {sym: m["vrp"] for sym, m in filtered_metrics.items() if "vrp" in m}
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.plotly_chart(
+                chart_components.term_structure_chart_multi(term_data, colors),
+                use_container_width=True,
+            )
+        with col2:
+            st.plotly_chart(
+                chart_components.skew_chart_multi(skew_data, colors),
+                use_container_width=True,
+            )
+
+        col3, col4 = st.columns(2)
+        with col3:
+            st.plotly_chart(
+                chart_components.curvature_chart_multi(curvature_data, colors),
+                use_container_width=True,
+            )
+        with col4:
+            if vrp_data:
+                st.plotly_chart(
+                    chart_components.vrp_chart_multi(vrp_data, colors),
+                    use_container_width=True,
+                )
+            else:
+                st.info("VRP metric unavailable for the selected symbols (needs price history at save time).")
+
+    richness_heading = "Expiry Richness"
+    if len(config.save_symbols) > 1:
+        richness_heading += f" — {primary} (primary symbol; not blended across the comparison set)"
+    st.subheader(richness_heading)
+
+    if primary not in filtered_metrics:
+        st.info(f"No data loaded for {primary} yet — click Refresh Live Data or run the pipeline for it.")
+        return
+
+    expiry_scores = get_expiry_scores(filtered_metrics[primary])
     if expiry_scores is not None:
         st.plotly_chart(
             chart_components.expiry_richness_table_style(expiry_scores),

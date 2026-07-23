@@ -212,6 +212,109 @@ def vrp_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
     )
 
 
+# ---------------------------------------------------------------------------
+# Multi-symbol overlay chart functions
+# ---------------------------------------------------------------------------
+
+
+def _multi_line_metric_chart(
+    data: Mapping[str, pd.DataFrame],
+    colors: Mapping[str, str],
+    x_col: str,
+    y_col: str,
+    title: str,
+    y_title: str,
+    zero_line: bool = False,
+    dte_col: str = "dte",
+) -> go.Figure:
+    """Overlay one line per symbol on shared axes -- same mark spec as
+    _line_metric_chart (2px line, 8px marker, quarterly date ticks) but with
+    a legend, since with >=2 series identity can no longer be carried by
+    the title alone. `colors` should assign each symbol a fixed hue by
+    identity (SYMBOL_REGISTRY in app.py), not by draw order, so a symbol's
+    line color stays constant as the selection changes. Symbols with no
+    usable data for this particular metric are skipped rather than erroring
+    the whole chart, so e.g. one symbol's snapshot missing VRP (no price
+    history at save time) doesn't blank out the others.
+    """
+    usable = {sym: df for sym, df in data.items() if _has_usable_data(df, [x_col, y_col])}
+    if not usable:
+        return _empty_figure(title)
+
+    fig = go.Figure()
+    for sym, df in usable.items():
+        has_dte = dte_col in df.columns
+        cols = [x_col, y_col] + ([dte_col] if has_dte else [])
+        plot_df = df[cols].dropna(subset=[x_col, y_col]).sort_values(x_col)
+        color = colors.get(sym, COLOR_TEXT_MUTED)
+
+        hovertemplate = f"<b>{sym}</b><br>%{{x|%b %d, %Y}}"
+        if has_dte:
+            hovertemplate += "<br>DTE %{customdata}"
+        hovertemplate += f"<br>{y_title} %{{y:.3f}}<extra></extra>"
+
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df[x_col],
+                y=plot_df[y_col],
+                mode="lines+markers",
+                name=sym,
+                line={"width": 2, "color": color},
+                marker={"size": 8, "color": color, "line": {"width": 2, "color": "#fcfcfb"}},
+                customdata=plot_df[dte_col] if has_dte else None,
+                hovertemplate=hovertemplate,
+            )
+        )
+
+    if zero_line:
+        fig.add_hline(y=0.0, line_width=1, line_color=COLOR_ZERO_LINE)
+
+    fig.update_layout(
+        template=TEMPLATE,
+        title=title,
+        xaxis_title="Expiration",
+        yaxis_title=y_title,
+        showlegend=True,
+        legend={"orientation": "h", "y": 1.14, "x": 0},
+        margin={"t": 80, "b": 40, "l": 60, "r": 30},
+    )
+    fig.update_xaxes(gridcolor=COLOR_GRID, zeroline=False, dtick="M3", tickformat="%b '%y")
+    fig.update_yaxes(gridcolor=COLOR_GRID, zeroline=False)
+    return fig
+
+
+def term_structure_chart_multi(data: Mapping[str, pd.DataFrame], colors: Mapping[str, str]) -> go.Figure:
+    """Overlaid ATM IV term structure, one line per symbol."""
+    return _multi_line_metric_chart(
+        data, colors, x_col="expiration", y_col="atm_iv",
+        title="ATM IV Term Structure", y_title="ATM IV (%)",
+    )
+
+
+def skew_chart_multi(data: Mapping[str, pd.DataFrame], colors: Mapping[str, str]) -> go.Figure:
+    """Overlaid 25D put-call skew, one line per symbol."""
+    return _multi_line_metric_chart(
+        data, colors, x_col="expiration", y_col="skew",
+        title="25D Put-Call Skew", y_title="Skew (IV points)", zero_line=True,
+    )
+
+
+def curvature_chart_multi(data: Mapping[str, pd.DataFrame], colors: Mapping[str, str]) -> go.Figure:
+    """Overlaid smile curvature, one line per symbol."""
+    return _multi_line_metric_chart(
+        data, colors, x_col="expiration", y_col="curvature",
+        title="Smile Curvature", y_title="Curvature (IV points)", zero_line=True,
+    )
+
+
+def vrp_chart_multi(data: Mapping[str, pd.DataFrame], colors: Mapping[str, str]) -> go.Figure:
+    """Overlaid volatility risk premium, one line per symbol."""
+    return _multi_line_metric_chart(
+        data, colors, x_col="expiration", y_col="vrp",
+        title="Volatility Risk Premium", y_title="VRP (IV - RV)", zero_line=True,
+    )
+
+
 def smile_chart(
     chain_df_for_expiry: pd.DataFrame,
     highlight_row: "pd.Series | Mapping | None" = None,

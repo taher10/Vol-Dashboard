@@ -111,7 +111,9 @@ def list_snapshot_dates(save_symbol: str = "SPX") -> list[date]:
     return sorted(dates)
 
 
-def trigger_live_refresh(api_symbol: str = "$SPX", save_symbol: str = "SPX") -> SnapshotBundle:
+def trigger_live_refresh(
+    api_symbol: str = "$SPX", save_symbol: str = "SPX", strike_increment: int | None = 100
+) -> SnapshotBundle:
     """
     Run the full live pipeline (auth → fetch → save → compute metrics) via
     OptionsVolJob, overwriting today's saved CSVs, then re-read via
@@ -119,7 +121,11 @@ def trigger_live_refresh(api_symbol: str = "$SPX", save_symbol: str = "SPX") -> 
     metrics, not chain/prices). Auth/network errors (e.g. missing
     token.json) are intentionally left to propagate unmodified — the
     Streamlit UI layer is responsible for catching and displaying them.
+
+    strike_increment is passed straight through to OptionsVolJob -- pass
+    None for equities (see options_fetcher.fetch_monthly_chain), the
+    validated $100 default is SPX-specific.
     """
-    job = OptionsVolJob(symbol=api_symbol, save_symbol=save_symbol)
+    job = OptionsVolJob(symbol=api_symbol, save_symbol=save_symbol, strike_increment=strike_increment)
     job.run()
     return load_latest_snapshot(save_symbol)

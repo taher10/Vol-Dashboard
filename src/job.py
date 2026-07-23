@@ -55,11 +55,17 @@ class OptionsVolJob:
 
     Parameters
     ----------
-    symbol      : Schwab API symbol (e.g. '$SPX')
-    save_symbol : Label used in CSV filenames (e.g. 'SPX')
-    target_delta: Delta used for skew/butterfly computations (default 0.25)
-    rv_window   : Realized vol lookback in trading days (default 21 ≈ 1 month)
-    data_dir    : Override the data directory (default: <project_root>/data)
+    symbol           : Schwab API symbol (e.g. '$SPX', or 'AAPL' for an equity --
+                        indices need the '$' prefix, equities don't)
+    save_symbol      : Label used in CSV filenames (e.g. 'SPX')
+    target_delta     : Delta used for skew/butterfly computations (default 0.25)
+    rv_window        : Realized vol lookback in trading days (default 21 ≈ 1 month)
+    data_dir         : Override the data directory (default: <project_root>/data)
+    strike_increment : $ spacing for the post-fetch strike filter in
+                        fetch_monthly_chain (default 100, validated for SPX).
+                        Pass None for individual equities, where a single
+                        fixed increment doesn't fit every underlying's price
+                        level -- see options_fetcher.fetch_monthly_chain.
     """
 
     def __init__(
@@ -69,11 +75,13 @@ class OptionsVolJob:
         target_delta: float = 0.25,
         rv_window: int = 21,
         data_dir: Optional[Path] = None,
+        strike_increment: Optional[int] = 100,
     ) -> None:
         self.symbol = symbol
         self.save_symbol = save_symbol
         self.target_delta = target_delta
         self.rv_window = rv_window
+        self.strike_increment = strike_increment
         self._auth = SchwabAuth.from_env()
         # CSVStore uses a day-based filename key, so reruns on the same UTC day overwrite.
         self._store = CSVStore(symbol=save_symbol, base_dir=data_dir)
@@ -100,8 +108,8 @@ class OptionsVolJob:
         # 2. Fetch
         fetcher = OptionsFetcher(client, symbol=self.symbol)
 
-        logger.info("Fetching monthly SPX options chain (±5 strikes ATM per expiry) ...")
-        chain = fetcher.fetch_monthly_chain(strikes_each_side=5)
+        logger.info("Fetching monthly options chain (±5 strikes ATM per expiry) ...")
+        chain = fetcher.fetch_monthly_chain(strikes_each_side=5, strike_increment=self.strike_increment)
         logger.info("Chain: %d contracts, %d expirations",
                     len(chain), chain["expiration"].nunique())
 
@@ -203,10 +211,19 @@ def _build_parser() -> argparse.ArgumentParser:
         description="SPX Options Volatility Database — Schwab API pipeline",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--symbol", default="$SPX", help="Schwab symbol to pull (e.g. $SPX, $NDX)")
+    p.add_argument("--symbol", default="$SPX", help="Schwab symbol to pull (e.g. $SPX for an index, AAPL for an equity -- no '$' prefix on equities)")
     p.add_argument("--save-symbol", default="SPX", help="Label used in CSV filenames")
     p.add_argument("--delta", type=float, default=0.25, help="Target delta for skew metrics")
     p.add_argument("--rv-window", type=int, default=21, help="Realized vol lookback (trading days)")
+    p.add_argument(
+        "--strike-increment", type=int, default=100,
+        help="$ spacing for the strike filter (validated default 100 is for SPX)",
+    )
+    p.add_argument(
+        "--no-strike-filter", action="store_true",
+        help="Skip the strike-increment filter and keep Schwab's native strike ladder "
+             "(recommended for individual equities, which don't share SPX's $100 spacing)",
+    )
     p.add_argument(
         "--first-time",
         action="store_true",
@@ -228,6 +245,7 @@ if __name__ == "__main__":
         save_symbol=args.save_symbol,
         target_delta=args.delta,
         rv_window=args.rv_window,
+        strike_increment=None if args.no_strike_filter else args.strike_increment,
     )
 
     if args.first_time:

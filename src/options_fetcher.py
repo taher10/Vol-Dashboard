@@ -130,7 +130,7 @@ class OptionsFetcher:
         to_date: Optional[date] = None,
         contract_type: str = "ALL",
         strikes_each_side: int = 5,
-        strike_increment: int = 100,
+        strike_increment: Optional[int] = 100,
         scale_strikes_with_dte: bool = True,
         dte_scaling_reference: float = 30.0,
         max_strikes_each_side: int = 40,
@@ -172,7 +172,13 @@ class OptionsFetcher:
         strikes_each_side       : baseline steps on each side of ATM at
                                    strike_increment spacing, used as-is for
                                    expiries at/under dte_scaling_reference days
-        strike_increment        : spacing between selected strikes in $ (default 100)
+        strike_increment        : spacing between selected strikes in $ (default 100).
+                                   None skips the increment filter entirely and keeps
+                                   whatever real strikes Schwab's own strike_count
+                                   parameter already returned around ATM -- use this
+                                   for individual equities, where a single fixed $
+                                   increment doesn't fit every underlying's price
+                                   level/tick size the way $100 fits SPX
         scale_strikes_with_dte  : if True (default), widen strikes_each_side for
                                    longer-dated expiries so they still bracket
                                    ~25-delta; if False, reproduces the old fixed
@@ -202,10 +208,16 @@ class OptionsFetcher:
             else:
                 n_side = strikes_each_side
 
-            # Fetch wide enough to guarantee we capture increment-aligned strikes.
-            # Worst case: SPX near-term has $1 increments → need 2 × n_side
-            # × increment strikes. Using 300 covers ±$500 at $5 increments safely.
-            wide_strike_count = max(300, n_side * strike_increment * 2 // 5)
+            if strike_increment:
+                # Fetch wide enough to guarantee we capture increment-aligned strikes.
+                # Worst case: SPX near-term has $1 increments → need 2 × n_side
+                # × increment strikes. Using 300 covers ±$500 at $5 increments safely.
+                wide_strike_count = max(300, n_side * strike_increment * 2 // 5)
+            else:
+                # No increment filter to compensate for -- Schwab's strike_count
+                # already centers on ATM, so just ask for enough margin above
+                # n_side for _trim_to_n_strikes to have real strikes to pick from.
+                wide_strike_count = max(100, n_side * 8)
 
             chunk = self._fetch_single_expiry(ct, exp, wide_strike_count)
             if not chunk.empty:
@@ -217,8 +229,10 @@ class OptionsFetcher:
 
         df = pd.concat(chunks, ignore_index=True)
 
-        # Post-filter: keep only strikes at the desired increment
-        df = df[df["strikePrice"] % strike_increment == 0].copy()
+        # Post-filter: keep only strikes at the desired increment (skipped
+        # entirely when strike_increment is None -- see docstring).
+        if strike_increment:
+            df = df[df["strikePrice"] % strike_increment == 0].copy()
 
         # Keep only ±n_side strikes from ATM per expiration, where n_side is
         # per-expiry when scale_strikes_with_dte is on, else the flat baseline.
