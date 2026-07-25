@@ -1,0 +1,60 @@
+name: Daily vol snapshot
+
+# Fetches every symbol in src/symbols.py's SYMBOL_REGISTRY and appends the
+# computed metrics to history/vol_history.db, then commits that file so
+# history survives between runs. This is what makes IV Rank, trailing
+# z-scores, and the day-over-day digest possible -- see
+# src/history_store.py's docstring for why a committed SQLite file rather
+# than a hosted database.
+#
+# Requires these repo secrets (Settings -> Secrets and variables -> Actions),
+# same values as the Streamlit Cloud secrets -- see README.md:
+#   SCHWAB_API_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL, SCHWAB_TOKEN_B64
+
+on:
+  schedule:
+    # 21:30 UTC, Mon-Fri -- after the US market close (20:00-21:00 UTC
+    # depending on DST) with a buffer for quotes to settle.
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch: {} # allows manually triggering a run from the Actions tab
+
+permissions:
+  contents: write # needed to commit history/vol_history.db back to the repo
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore token.json from secret
+        env:
+          SCHWAB_TOKEN_B64: ${{ secrets.SCHWAB_TOKEN_B64 }}
+        run: |
+          python -c "
+          import os
+          from src.auth import write_token_from_base64
+          write_token_from_base64(os.environ['SCHWAB_TOKEN_B64'])
+          "
+
+      - name: Run daily snapshot
+        env:
+          SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_CALLBACK_URL: ${{ secrets.SCHWAB_CALLBACK_URL }}
+        run: python -m src.daily_snapshot
+
+      - name: Commit history if it changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history/vol_history.db
+          git diff --staged --quiet || git commit -m "Daily vol snapshot $(date -u +%F)"
+          git push

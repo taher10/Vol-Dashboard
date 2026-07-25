@@ -69,10 +69,28 @@ The app's disk is ephemeral there, and `schwab-py`'s first-time OAuth flow needs
    SCHWAB_APP_SECRET = "your_client_secret"
    SCHWAB_TOKEN_B64 = "paste the base64 string from step 2 here"
    ```
-   `app.py` reads `SCHWAB_TOKEN_B64` on startup ([`_bootstrap_token_from_secret`](src/dashboard/app.py)) and writes it to `token.json` if no token is present yet — see [`write_token_from_base64`](src/auth.py). It never overwrites a token already on disk, so schwab-py's automatic in-place refresh during a session is preserved.
+   `app.py` reads `SCHWAB_TOKEN_B64` on startup ([`_bootstrap_secrets`](src/dashboard/app.py)) and writes it to `token.json` if no token is present yet — see [`write_token_from_base64`](src/auth.py). It never overwrites a token already on disk, so schwab-py's automatic in-place refresh during a session is preserved.
 5. Once deployed, use the sidebar's **Refresh Live Data** button to pull a live snapshot — the dashboard has no data until that's clicked at least once per cold start, since `data/` isn't persisted either.
 6. **When the token eventually expires** (schwab-py refresh tokens are long-lived but not permanent), repeat steps 1–2 locally and update the `SCHWAB_TOKEN_B64` secret, then reboot the app from the Streamlit Cloud dashboard.
 
+## Multi-symbol support and historical data
+
+`src/symbols.py`'s `SYMBOL_REGISTRY` lists every symbol the dashboard/pipeline knows about (SPX + the MAG7 equities) and each one's fetch parameters — an index needs a `$`-prefixed `api_symbol` and is validated at `strike_increment=100`/`strikes_each_side=5`; equities need `strike_increment=None` (skip the fixed-$-increment filter entirely) and a much wider `strikes_each_side=20` so skew/curvature can actually reach 25-delta at an equity's tighter native strike spacing. The dashboard sidebar's "Symbols" multiselect reads from this registry directly.
+
+**Why there's a second persistence layer.** `CSVStore` (`data/`, gitignored) only ever holds the *latest* snapshot — it overwrites same-day files, and the deployed app's disk is ephemeral, so nothing accumulates real day-over-day history there. IV Rank, a metric's z-score against its own trailing distribution, and a day-over-day digest all need that history, so there's a second store for it:
+
+- **`src/history_store.py`**'s `HistoryStore` — a small SQLite database at `history/vol_history.db`, one row per `(symbol, snapshot_date, expiration)`, holding `atm_iv`/`skew`/`curvature`/`realized_vol`/`vrp`. Query helpers: `iv_rank()`, `trailing_zscore()`, `prior_snapshot()`.
+- **`src/daily_snapshot.py`** — headless multi-symbol runner (`python -m src.daily_snapshot`) that fetches every symbol in the registry and appends into `HistoryStore`. One symbol failing doesn't abort the others.
+- **`.github/workflows/daily-snapshot.yml`** — runs the above on a schedule (weekdays, ~21:30 UTC, after the US market close) and commits `history/vol_history.db` if it changed. This is a **git-committed SQLite file, not a hosted database** — a deliberate choice to avoid a new external service for a single-user tool; it does mean history only accumulates from whenever the workflow was enabled, there's no historical backfill.
+
+  Requires these **GitHub repo secrets** (Settings → Secrets and variables → Actions) — same values as the Streamlit Cloud secrets above, but it's a separate secret store, so they need to be added again here:
+  ```
+  SCHWAB_API_KEY
+  SCHWAB_APP_SECRET
+  SCHWAB_CALLBACK_URL
+  SCHWAB_TOKEN_B64
+  ```
+
 ## Notes
 
-- `data/`, `.env`, `config.ini`, `token.json`, and `.streamlit/secrets.toml` are gitignored (per `.gitignore`) since they hold credentials/tokens or can grow large — `.env.example` and `config.ini.example` are the checked-in templates.
+- `data/`, `.env`, `config.ini`, `token.json`, and `.streamlit/secrets.toml` are gitignored (per `.gitignore`) since they hold credentials/tokens or can grow large — `.env.example` and `config.ini.example` are the checked-in templates. `history/vol_history.db` is deliberately **not** gitignored — see above.
