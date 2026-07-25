@@ -306,8 +306,14 @@ def _multi_line_metric_chart(
 
         hovertemplate = f"<b>{sym}</b><br>%{{x|%b %d, %Y}}"
         if has_dte:
-            hovertemplate += "<br>DTE %{customdata}"
+            hovertemplate += "<br>DTE %{customdata[0]}"
         hovertemplate += f"<br>{y_title} %{{y:.3f}}<extra></extra>"
+
+        # customdata carries [dte, symbol] per point (not just dte, unlike
+        # the single-symbol chart) -- a click can land on any of the
+        # overlaid lines here, so the symbol has to travel with the point
+        # itself rather than being inferred from context by the caller.
+        customdata = [[d, sym] for d in plot_df[dte_col]] if has_dte else None
 
         fig.add_trace(
             go.Scatter(
@@ -317,7 +323,7 @@ def _multi_line_metric_chart(
                 name=sym,
                 line={"width": 2, "color": color},
                 marker={"size": 8, "color": color, "line": {"width": 2, "color": "#fcfcfb"}},
-                customdata=plot_df[dte_col] if has_dte else None,
+                customdata=customdata,
                 hovertemplate=hovertemplate,
             )
         )

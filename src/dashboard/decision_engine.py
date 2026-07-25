@@ -325,11 +325,18 @@ def build_takeaway(
     "typical" for this symbol's own curve) and reports its richness and
     skew tilt.
 
+    Deliberately says "vs. its own realized vol" rather than just "richest"
+    -- VRP richness and absolute IV level are different things (a name can
+    have much lower raw IV than another and still show a bigger gap vs. its
+    own realized vol), and a bare "richest in basket" claim sitting right
+    next to a chart where a different symbol is visibly higher reads as
+    wrong even though it's answering a different question. Confirmed this
+    was a real point of confusion, not just a hypothetical one.
+
     basket_ranks, if given, is one comparable number per symbol currently
     selected in the sidebar (each symbol's own most-notable *signed*
-    vrp_z) -- "richest vol in basket" only means something once there's
-    more than one symbol to compare against, so the cross-symbol clause is
-    only appended when len(basket_ranks) > 1.
+    vrp_z) -- the cross-symbol clause is only appended when there's more
+    than one symbol to actually compare against.
     """
     if expiry_scores is None or expiry_scores.empty:
         return f"{symbol}: no expiry data available yet."
@@ -345,11 +352,11 @@ def build_takeaway(
     skew_bias = str(notable["skew_bias"]).lower()
 
     if abs(vrp_z) < _Z_THRESHOLD:
-        sentence = f"{symbol}: VRP is roughly flat across the curve (max |z|={abs(vrp_z):.1f}) — no expiry stands out as notably rich or cheap."
+        sentence = f"{symbol}: VRP is roughly flat across the curve (max |z|={abs(vrp_z):.1f}) — no expiry stands out as notably rich or cheap vs. its own realized vol."
     else:
         richness = str(notable["richness_label"]).lower()
         sentence = (
-            f"{symbol} {expiration} ({dte}d) is the {richness} vol on the curve "
+            f"{symbol} {expiration} ({dte}d) is {richness} vs. its own realized vol "
             f"(VRP z={vrp_z:+.1f}), with a {skew_bias} skew tilt."
         )
 
@@ -357,10 +364,10 @@ def build_takeaway(
         ordered = sorted(basket_ranks.items(), key=lambda kv: kv[1], reverse=True)
         rank = next(i for i, (sym, _) in enumerate(ordered, start=1) if sym == symbol)
         if rank == 1:
-            sentence += f" Richest vol in the {len(basket_ranks)}-symbol basket."
+            sentence += f" Widest IV-vs-RV gap in the {len(basket_ranks)}-symbol basket (not the same as highest raw IV)."
         elif rank == len(basket_ranks):
-            sentence += f" Cheapest vol in the {len(basket_ranks)}-symbol basket."
+            sentence += f" Narrowest IV-vs-RV gap in the {len(basket_ranks)}-symbol basket."
         else:
-            sentence += f" Ranks {rank}/{len(basket_ranks)} for richness in the selected basket."
+            sentence += f" Ranks {rank}/{len(basket_ranks)} for IV-vs-RV richness in the selected basket."
 
     return sentence

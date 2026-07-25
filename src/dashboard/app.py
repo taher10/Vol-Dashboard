@@ -324,6 +324,37 @@ def render_sidebar() -> AppConfig:
 # ---------------------------------------------------------------------------
 
 
+def _handle_term_structure_click(event, default_symbol: str | None = None) -> None:
+    """Shared click-to-Drilldown handler for both the single- and multi-
+    symbol term structure charts.
+
+    The single-symbol chart's customdata carries only dte (the symbol is
+    already fixed/known from context, so default_symbol covers it); the
+    multi-symbol overlay's customdata carries [dte, symbol] per point
+    instead, since a click can land on any of the overlaid lines and the
+    symbol has to travel with the point itself. When a symbol comes back,
+    it's written into the sidebar's own multiselect state key
+    (cfg_save_symbols) so the Drilldown page narrows to just that symbol
+    rather than staying on whatever the multi-symbol selection was.
+    """
+    points = (event or {}).get("selection", {}).get("points", [])
+    if not points:
+        return
+    customdata = points[0].get("customdata")
+    if isinstance(customdata, list) and len(customdata) >= 2:
+        dte, symbol = customdata[0], customdata[1]
+    elif isinstance(customdata, list) and len(customdata) == 1:
+        dte, symbol = customdata[0], default_symbol
+    else:
+        dte, symbol = customdata, default_symbol
+    if dte is None:
+        return
+    if symbol:
+        st.session_state["cfg_save_symbols"] = [symbol]
+    st.session_state["jump_to_dte"] = int(dte)
+    st.switch_page("pages/1_Expiry_Drilldown.py")
+
+
 def render_overview(config: AppConfig) -> None:
     st.title("Options Vol Dashboard — Overview")
 
@@ -368,6 +399,30 @@ def render_overview(config: AppConfig) -> None:
     if expiry_scores is not None:
         st.info(decision_engine.build_takeaway(primary, expiry_scores, basket_ranks))
 
+    # Liquidity-near-target-delta also lives in the sidebar (right where the
+    # slider is), but that's easy to scroll past -- surfaced here too, on
+    # the primary symbol's chain, so it's visible without hunting for it.
+    primary_bundle = bundles.get(primary)
+    if primary_bundle is not None:
+        liquidity = decision_engine.liquidity_near_delta(
+            primary_bundle.chain, config.target_delta, config.delta_tolerance
+        )
+        if liquidity is not None:
+            if liquidity["data_unavailable"]:
+                st.caption(f"ℹ {primary}'s feed doesn't report open interest — can't check liquidity near {config.target_delta:.2f}Δ.")
+            elif liquidity["is_thin"]:
+                st.warning(
+                    f"⚠ Thin OI near {config.target_delta:.2f}Δ on {primary}: median open interest "
+                    f"{liquidity['median_oi']:.0f} across {liquidity['n_contracts']} contracts "
+                    f"({liquidity['pct_thin']:.0f}% under 100 OI). A 'buy the {config.target_delta:.2f} delta' "
+                    f"intent here would likely point at a thinly-held strike."
+                )
+            else:
+                st.caption(
+                    f"✓ {liquidity['n_contracts']} contracts near {config.target_delta:.2f}Δ on {primary}, "
+                    f"median OI {liquidity['median_oi']:.0f} — reasonable liquidity for the current target delta."
+                )
+
     if len(config.save_symbols) == 1:
         # Single symbol: keep the original per-symbol chart titles/no-legend
         # layout rather than the overlay variant's generic titles + legend.
@@ -393,17 +448,7 @@ def render_overview(config: AppConfig) -> None:
                 key="overview_term_structure_chart",
             )
             st.caption("Click a point to jump to its Expiry Drilldown.")
-            points = (ts_event or {}).get("selection", {}).get("points", [])
-            if points:
-                clicked_dte = points[0].get("customdata")
-                # Plotly's event payload can carry a single-element list or a
-                # bare scalar for a 1-D customdata series depending on how the
-                # frontend serializes it -- handle both defensively.
-                if isinstance(clicked_dte, list):
-                    clicked_dte = clicked_dte[0] if clicked_dte else None
-                if clicked_dte is not None:
-                    st.session_state["jump_to_dte"] = int(clicked_dte)
-                    st.switch_page("pages/1_Expiry_Drilldown.py")
+            _handle_term_structure_click(ts_event, default_symbol=primary)
         with col2:
             st.plotly_chart(
                 chart_components.skew_chart(skew_df, symbol=primary),
@@ -433,10 +478,15 @@ def render_overview(config: AppConfig) -> None:
 
         col1, col2 = st.columns(2)
         with col1:
-            st.plotly_chart(
+            ts_event_multi = st.plotly_chart(
                 chart_components.term_structure_chart_multi(term_data, colors),
                 use_container_width=True,
+                on_select="rerun",
+                selection_mode="points",
+                key="overview_term_structure_chart_multi",
             )
+            st.caption("Click a point to jump to its Expiry Drilldown.")
+            _handle_term_structure_click(ts_event_multi)
         with col2:
             st.plotly_chart(
                 chart_components.skew_chart_multi(skew_data, colors),
