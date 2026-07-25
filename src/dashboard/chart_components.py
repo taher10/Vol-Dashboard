@@ -94,6 +94,29 @@ def _has_usable_data(df: pd.DataFrame | None, cols: list[str]) -> bool:
     return not df[cols].dropna(how="any").empty
 
 
+def _quarterly_ticks(start: pd.Timestamp, end: pd.Timestamp) -> tuple[list[pd.Timestamp], list[str]]:
+    """Explicit quarter-start tick positions spanning [start, end], labeled "Jan '26" etc.
+
+    Plotly's dtick="M3" leaves tick placement to Plotly.js at render time,
+    and in a narrow ~2-column chart it was silently dropping most of the
+    labels rather than fitting all ~8 quarters a 2-year term structure
+    needs (confirmed: only 2 of the expected labels were rendering).
+    Computing exact tickvals/ticktext here instead makes rendering
+    deterministic and independent of Plotly's auto-collision heuristics.
+    """
+    tz = start.tzinfo  # metrics dataframes carry tz-aware (UTC) expiration columns
+    first_q_month = ((start.month - 1) // 3) * 3 + 1
+    tick = pd.Timestamp(year=start.year, month=first_q_month, day=1, tz=tz)
+    ticks: list[pd.Timestamp] = []
+    while tick <= end:
+        ticks.append(tick)
+        month = tick.month + 3
+        year = tick.year + (month - 1) // 12
+        tick = pd.Timestamp(year=year, month=(month - 1) % 12 + 1, day=1, tz=tz)
+    ticks.append(tick)  # one more just past the data so the last point isn't flush against the axis edge
+    return ticks, [t.strftime("%b '%y") for t in ticks]
+
+
 def _line_metric_chart(
     df: pd.DataFrame,
     x_col: str,
@@ -150,9 +173,13 @@ def _line_metric_chart(
         xaxis_title="Expiration",
         yaxis_title=y_title,
         showlegend=False,
-        margin={"t": 60, "b": 40, "l": 60, "r": 30},
+        margin={"t": 60, "b": 50, "l": 60, "r": 30},
     )
-    fig.update_xaxes(gridcolor=COLOR_GRID, zeroline=False, dtick="M3", tickformat="%b '%y")
+    tickvals, ticktext = _quarterly_ticks(plot_df[x_col].min(), plot_df[x_col].max())
+    fig.update_xaxes(
+        gridcolor=COLOR_GRID, zeroline=False,
+        tickmode="array", tickvals=tickvals, ticktext=ticktext, tickangle=-45,
+    )
     fig.update_yaxes(gridcolor=COLOR_GRID, zeroline=False)
     return fig
 
@@ -161,9 +188,19 @@ def _line_metric_chart(
 # Public chart functions
 # ---------------------------------------------------------------------------
 
-def term_structure_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
-    """Line+marker chart: x=expiration (quarterly ticks), y=atm_iv."""
-    return _line_metric_chart(
+def term_structure_chart(
+    df: pd.DataFrame, symbol: str = "Underlying", realized_vol: float | None = None
+) -> go.Figure:
+    """Line+marker chart: x=expiration (quarterly ticks), y=atm_iv.
+
+    realized_vol, if given, overlays it as a dashed horizontal reference
+    line on the *same axis* as ATM IV -- seeing IV vs RV directly is more
+    legible than only ever showing their difference (VRP) as a separate
+    derived-metric chart. It's a single trailing-window number (not
+    per-expiry), so it renders as one flat line across the visible range
+    rather than a second curve.
+    """
+    fig = _line_metric_chart(
         df,
         x_col="expiration",
         y_col="atm_iv",
@@ -171,6 +208,20 @@ def term_structure_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Fig
         y_title="ATM IV (%)",
         color=COLOR_LINE_DEFAULT,
     )
+    if realized_vol is not None and _has_usable_data(df, ["expiration", "atm_iv"]):
+        x_span = df["expiration"].dropna()
+        fig.add_trace(
+            go.Scatter(
+                x=[x_span.min(), x_span.max()],
+                y=[realized_vol, realized_vol],
+                mode="lines",
+                name="Realized Vol (21d)",
+                line={"width": 2, "color": COLOR_TEXT_MUTED, "dash": "dash"},
+                hovertemplate=f"Realized Vol (21d) %{{y:.2f}}<extra></extra>",
+            )
+        )
+        fig.update_layout(showlegend=True, legend={"orientation": "h", "y": 1.12, "x": 0})
+    return fig
 
 
 def skew_chart(df: pd.DataFrame, symbol: str = "Underlying") -> go.Figure:
@@ -242,11 +293,16 @@ def _multi_line_metric_chart(
         return _empty_figure(title)
 
     fig = go.Figure()
+    range_start = range_end = None
     for sym, df in usable.items():
         has_dte = dte_col in df.columns
         cols = [x_col, y_col] + ([dte_col] if has_dte else [])
         plot_df = df[cols].dropna(subset=[x_col, y_col]).sort_values(x_col)
         color = colors.get(sym, COLOR_TEXT_MUTED)
+
+        sym_min, sym_max = plot_df[x_col].min(), plot_df[x_col].max()
+        range_start = sym_min if range_start is None else min(range_start, sym_min)
+        range_end = sym_max if range_end is None else max(range_end, sym_max)
 
         hovertemplate = f"<b>{sym}</b><br>%{{x|%b %d, %Y}}"
         if has_dte:
@@ -276,9 +332,13 @@ def _multi_line_metric_chart(
         yaxis_title=y_title,
         showlegend=True,
         legend={"orientation": "h", "y": 1.14, "x": 0},
-        margin={"t": 80, "b": 40, "l": 60, "r": 30},
+        margin={"t": 80, "b": 50, "l": 60, "r": 30},
     )
-    fig.update_xaxes(gridcolor=COLOR_GRID, zeroline=False, dtick="M3", tickformat="%b '%y")
+    tickvals, ticktext = _quarterly_ticks(range_start, range_end)
+    fig.update_xaxes(
+        gridcolor=COLOR_GRID, zeroline=False,
+        tickmode="array", tickvals=tickvals, ticktext=ticktext, tickangle=-45,
+    )
     fig.update_yaxes(gridcolor=COLOR_GRID, zeroline=False)
     return fig
 

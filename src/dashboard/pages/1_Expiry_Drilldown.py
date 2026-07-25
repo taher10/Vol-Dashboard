@@ -58,6 +58,19 @@ def _fmt_label(expiration, dte) -> str:
 expiry_labels = [_fmt_label(r.expiration, r.dte) for r in expiry_dte.itertuples()]
 label_to_exp = dict(zip(expiry_labels, expiry_dte["expiration"]))
 
+# Arriving via a click on the Overview page's term structure chart --
+# pre-seed the selectbox's own session_state key with the matching label
+# *before* the widget is created below, which is how Streamlit widgets
+# pick up a starting value from session_state. Popped so it only applies
+# once, not on every subsequent visit to this page.
+if "jump_to_dte" in st.session_state:
+    target_dte = st.session_state.pop("jump_to_dte")
+    match = expiry_dte[expiry_dte["dte"] == target_dte]
+    if not match.empty:
+        matched_label = _fmt_label(match.iloc[0].expiration, match.iloc[0].dte)
+        if matched_label in expiry_labels:
+            st.session_state["drilldown_expiry"] = matched_label
+
 selected_label = st.selectbox("Expiry", expiry_labels, key="drilldown_expiry")
 selected_expiration = label_to_exp[selected_label]
 

@@ -256,6 +256,32 @@ def render_sidebar() -> AppConfig:
         "Delta tolerance", min_value=0.05, max_value=0.30, value=0.15, step=0.01, key="cfg_delta_tolerance"
     )
 
+    # Proactive check on the *primary* symbol's chain: does the delta the
+    # user just dialed in actually have real open interest anywhere near
+    # it, or would a "buy the 0.25 delta" intent point at a strike no one's
+    # holding. OI only -- this data source's `volume` field reads 0 on
+    # every contract regardless of real liquidity, so it isn't a usable
+    # signal here (confirmed against live AAPL/SPX data).
+    try:
+        chain_for_liquidity = get_snapshot(save_symbol).chain
+    except Exception:
+        chain_for_liquidity = None
+    liquidity = decision_engine.liquidity_near_delta(chain_for_liquidity, float(target_delta), float(delta_tolerance))
+    if liquidity is not None:
+        if liquidity["data_unavailable"]:
+            st.sidebar.caption(f"ℹ {save_symbol}'s feed doesn't report open interest — can't check liquidity here.")
+        elif liquidity["is_thin"]:
+            st.sidebar.warning(
+                f"⚠ Thin OI near {target_delta:.2f}Δ on {save_symbol}: median open interest "
+                f"{liquidity['median_oi']:.0f} across {liquidity['n_contracts']} contracts "
+                f"({liquidity['pct_thin']:.0f}% under 100 OI). Consider a different delta or expiry."
+            )
+        else:
+            st.sidebar.caption(
+                f"✓ {liquidity['n_contracts']} contracts near {target_delta:.2f}Δ on {save_symbol}, "
+                f"median OI {liquidity['median_oi']:.0f}."
+            )
+
     st.sidebar.divider()
     st.sidebar.subheader("Score Weights")
     w_value = st.sidebar.slider("Value weight", 0.0, 1.0, 0.4, step=0.05, key="cfg_w_value")
@@ -322,6 +348,26 @@ def render_overview(config: AppConfig) -> None:
         for sym, bundle in bundles.items()
     }
 
+    # Computed once here (rather than inline near the richness table below)
+    # so the same expiry_scores backs both the one-line takeaway above the
+    # chart grid and the table -- avoids running score_expiries() twice and
+    # showing get_expiry_scores()'s "no data" messages twice.
+    expiry_scores = get_expiry_scores(filtered_metrics[primary]) if primary in filtered_metrics else None
+
+    basket_ranks: dict[str, float] = {}
+    if len(config.save_symbols) > 1:
+        for sym, m in filtered_metrics.items():
+            try:
+                scores = decision_engine.score_expiries(m)
+            except ValueError:
+                continue  # missing term_structure for this symbol -- skip it, not fatal for the basket comparison
+            valid = scores.dropna(subset=["vrp_z"])
+            if not valid.empty:
+                basket_ranks[sym] = float(valid.loc[valid["vrp_z"].abs().idxmax(), "vrp_z"])
+
+    if expiry_scores is not None:
+        st.info(decision_engine.build_takeaway(primary, expiry_scores, basket_ranks))
+
     if len(config.save_symbols) == 1:
         # Single symbol: keep the original per-symbol chart titles/no-legend
         # layout rather than the overlay variant's generic titles + legend.
@@ -330,12 +376,34 @@ def render_overview(config: AppConfig) -> None:
         skew_df = metrics.get("skew", pd.DataFrame())
         curvature_df = metrics.get("curvature", pd.DataFrame())
 
+        realized_vol = None
+        vrp_df_for_rv = metrics.get("vrp")
+        if vrp_df_for_rv is not None and not vrp_df_for_rv.empty and "realized_vol" in vrp_df_for_rv.columns:
+            rv_series = vrp_df_for_rv["realized_vol"].dropna()
+            if not rv_series.empty:
+                realized_vol = float(rv_series.iloc[0])
+
         col1, col2 = st.columns(2)
         with col1:
-            st.plotly_chart(
-                chart_components.term_structure_chart(term_df, symbol=primary),
+            ts_event = st.plotly_chart(
+                chart_components.term_structure_chart(term_df, symbol=primary, realized_vol=realized_vol),
                 use_container_width=True,
+                on_select="rerun",
+                selection_mode="points",
+                key="overview_term_structure_chart",
             )
+            st.caption("Click a point to jump to its Expiry Drilldown.")
+            points = (ts_event or {}).get("selection", {}).get("points", [])
+            if points:
+                clicked_dte = points[0].get("customdata")
+                # Plotly's event payload can carry a single-element list or a
+                # bare scalar for a 1-D customdata series depending on how the
+                # frontend serializes it -- handle both defensively.
+                if isinstance(clicked_dte, list):
+                    clicked_dte = clicked_dte[0] if clicked_dte else None
+                if clicked_dte is not None:
+                    st.session_state["jump_to_dte"] = int(clicked_dte)
+                    st.switch_page("pages/1_Expiry_Drilldown.py")
         with col2:
             st.plotly_chart(
                 chart_components.skew_chart(skew_df, symbol=primary),
@@ -399,7 +467,6 @@ def render_overview(config: AppConfig) -> None:
         st.info(f"No data loaded for {primary} yet — click Refresh Live Data or run the pipeline for it.")
         return
 
-    expiry_scores = get_expiry_scores(filtered_metrics[primary])
     if expiry_scores is not None:
         st.plotly_chart(
             chart_components.expiry_richness_table_style(expiry_scores),

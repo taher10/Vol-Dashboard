@@ -258,3 +258,109 @@ def score_contracts(
 def top_candidates(scored: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     """Convenience: the top n rows of an already-scored/sorted DataFrame."""
     return scored.head(n)
+
+
+def liquidity_near_delta(
+    chain: pd.DataFrame,
+    target_delta: float,
+    delta_tolerance: float,
+    thin_oi_threshold: int = 100,
+) -> dict | None:
+    """
+    Quick open-interest gut-check for whatever's currently quoted within
+    delta_tolerance of target_delta, across the whole chain (every expiry
+    and side) -- not full contract scoring, just "is there real open
+    interest anywhere near this delta, or would a 'buy the 0.25 delta'
+    intent point at a strike no one's actually holding." OI only, not
+    volume: this data source's `volume` field reads 0 on every contract
+    regardless of actual liquidity, so it's not a usable signal here.
+
+    Returns None if there's no chain data or nothing quoted in range
+    (distinct from "found contracts, they're just thin" -- that's
+    is_thin=True on a real result).
+
+    Distinguishes two very different situations that both look like
+    "median OI is low": genuinely thin liquidity near this delta
+    specifically vs. this symbol's feed not reporting openInterest at all
+    (confirmed: SPX's openInterest reads exactly 0 on literally every
+    contract in the chain, not just near-the-money ones, while AAPL has
+    real varied OI up to 75k+ -- an index-options data-source gap, not a
+    liquidity signal). data_unavailable=True means "we have no OI data to
+    judge this on," not "this is illiquid" -- a warning phrased as the
+    latter would be wrong and would fire on every single SPX view.
+    """
+    if chain is None or chain.empty or "delta" not in chain.columns or "openInterest" not in chain.columns:
+        return None
+    df = chain.dropna(subset=["delta", "openInterest"]).copy()
+    if df.empty:
+        return None
+    data_unavailable = (df["openInterest"] == 0).all()
+
+    df["abs_delta"] = df["delta"].abs()
+    near = df[(df["abs_delta"] - target_delta).abs() <= delta_tolerance]
+    if near.empty:
+        return None
+    median_oi = float(near["openInterest"].median())
+    return {
+        "n_contracts": len(near),
+        "median_oi": median_oi,
+        "min_oi": int(near["openInterest"].min()),
+        "max_oi": int(near["openInterest"].max()),
+        "pct_thin": float((near["openInterest"] < thin_oi_threshold).mean() * 100),
+        "is_thin": median_oi < thin_oi_threshold and not data_unavailable,
+        "data_unavailable": data_unavailable,
+    }
+
+
+def build_takeaway(
+    symbol: str,
+    expiry_scores: pd.DataFrame,
+    basket_ranks: dict[str, float] | None = None,
+) -> str:
+    """
+    One-sentence synthesis of score_expiries() output -- turns the 4-chart
+    Overview grid + richness table into an instant answer instead of
+    something the user has to read off manually. Picks the single most
+    statistically notable expiry (highest |vrp_z|, i.e. furthest from
+    "typical" for this symbol's own curve) and reports its richness and
+    skew tilt.
+
+    basket_ranks, if given, is one comparable number per symbol currently
+    selected in the sidebar (each symbol's own most-notable *signed*
+    vrp_z) -- "richest vol in basket" only means something once there's
+    more than one symbol to compare against, so the cross-symbol clause is
+    only appended when len(basket_ranks) > 1.
+    """
+    if expiry_scores is None or expiry_scores.empty:
+        return f"{symbol}: no expiry data available yet."
+
+    valid = expiry_scores.dropna(subset=["vrp_z"])
+    if valid.empty:
+        return f"{symbol}: VRP not available for this snapshot (needs price history at save time)."
+
+    notable = valid.loc[valid["vrp_z"].abs().idxmax()]
+    dte = int(notable["dte"])
+    expiration = pd.Timestamp(notable["expiration"]).strftime("%b %d")
+    vrp_z = float(notable["vrp_z"])
+    skew_bias = str(notable["skew_bias"]).lower()
+
+    if abs(vrp_z) < _Z_THRESHOLD:
+        sentence = f"{symbol}: VRP is roughly flat across the curve (max |z|={abs(vrp_z):.1f}) — no expiry stands out as notably rich or cheap."
+    else:
+        richness = str(notable["richness_label"]).lower()
+        sentence = (
+            f"{symbol} {expiration} ({dte}d) is the {richness} vol on the curve "
+            f"(VRP z={vrp_z:+.1f}), with a {skew_bias} skew tilt."
+        )
+
+    if basket_ranks and len(basket_ranks) > 1 and symbol in basket_ranks:
+        ordered = sorted(basket_ranks.items(), key=lambda kv: kv[1], reverse=True)
+        rank = next(i for i, (sym, _) in enumerate(ordered, start=1) if sym == symbol)
+        if rank == 1:
+            sentence += f" Richest vol in the {len(basket_ranks)}-symbol basket."
+        elif rank == len(basket_ranks):
+            sentence += f" Cheapest vol in the {len(basket_ranks)}-symbol basket."
+        else:
+            sentence += f" Ranks {rank}/{len(basket_ranks)} for richness in the selected basket."
+
+    return sentence
