@@ -84,14 +84,23 @@ export default function ExpiryDrilldownPage() {
 
             {score && (
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                <StatCard label="ATM IV" value={fmtNum(score.atm_iv, 2)} />
-                <StatCard label="Skew" value={fmtNum(score.skew, 2)} />
-                <StatCard label="Curvature" value={fmtNum(score.curvature, 2)} />
+                <StatCard label="ATM IV" value={fmtNum(score.atm_iv, 2)} hint="At-the-money implied volatility for this expiry." />
+                <StatCard
+                  label="Skew"
+                  value={fmtNum(score.skew, 2)}
+                  hint="IV(25Δ put) − IV(25Δ call). Positive means puts are priced richer than calls."
+                />
+                <StatCard
+                  label="Curvature"
+                  value={fmtNum(score.curvature, 2)}
+                  hint="Butterfly: average of 25Δ put/call IV minus ATM IV — how much the wings are priced up relative to the middle."
+                />
                 <StatCard
                   label="Richness"
                   value={score.richness_label}
                   accent={key === "cheap" ? "good" : key === "rich" ? "critical" : "neutral"}
                   sub={score.skew_bias}
+                  hint="This expiry's IV vs. its own realized vol, ranked against neighboring expiries. Rich favors selling premium, Cheap favors buying."
                 />
               </div>
             )}

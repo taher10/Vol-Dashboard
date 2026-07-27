@@ -133,7 +133,11 @@ export default function OverviewPage() {
             const vrpSeries = buildSeries("vrp", "vrp");
             return (
               <>
-                <ChartCard title="Term Structure" action={<ChartLegend series={termSeries} />}>
+                <ChartCard
+                  title="Term Structure"
+                  hint="At-the-money implied volatility across expiries — how the market prices volatility differently by time to expiration."
+                  action={<ChartLegend series={termSeries} />}
+                >
                   {loading && !data ? (
                     <Skeleton className="h-64 w-full" />
                   ) : (
@@ -141,7 +145,11 @@ export default function OverviewPage() {
                   )}
                 </ChartCard>
 
-                <ChartCard title="Skew (25Δ put − call)" action={<ChartLegend series={skewSeries} />}>
+                <ChartCard
+                  title="Skew (25Δ put − call)"
+                  hint="IV(25Δ put) − IV(25Δ call). Positive means puts are priced richer than calls the same distance from the money."
+                  action={<ChartLegend series={skewSeries} />}
+                >
                   {loading && !data ? (
                     <Skeleton className="h-64 w-full" />
                   ) : (
@@ -149,7 +157,11 @@ export default function OverviewPage() {
                   )}
                 </ChartCard>
 
-                <ChartCard title="Curvature" action={<ChartLegend series={curvatureSeries} />}>
+                <ChartCard
+                  title="Curvature"
+                  hint="Butterfly: average of 25Δ put/call IV minus ATM IV — how much the smile's wings are priced up relative to its middle."
+                  action={<ChartLegend series={curvatureSeries} />}
+                >
                   {loading && !data ? (
                     <Skeleton className="h-64 w-full" />
                   ) : (
@@ -157,7 +169,11 @@ export default function OverviewPage() {
                   )}
                 </ChartCard>
 
-                <ChartCard title="Variance Risk Premium" action={<ChartLegend series={vrpSeries} />}>
+                <ChartCard
+                  title="Variance Risk Premium"
+                  hint="ATM implied volatility minus realized volatility — how much more (or less) the options market is pricing in than what actually happened."
+                  action={<ChartLegend series={vrpSeries} />}
+                >
                   {loading && !data ? (
                     <Skeleton className="h-64 w-full" />
                   ) : (

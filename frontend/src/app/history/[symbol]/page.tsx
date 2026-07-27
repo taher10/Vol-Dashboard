@@ -87,6 +87,7 @@ export default function HistoryPage() {
             label="IV Rank (30d)"
             value={ivRank ? fmtNum(ivRank.iv_rank, 0) : "—"}
             sub={ivRank ? `Percentile ${fmtNum(ivRank.iv_percentile, 0)}` : "Needs 2+ sessions"}
+            hint="Where today's ~30-day ATM IV sits in its trailing 1-year range, 0–100. 100 = highest IV seen in the window."
           />
           <StatCard
             label="IV (current)"
@@ -97,6 +98,7 @@ export default function HistoryPage() {
             label={`${metric === "atm_iv" ? "Skew" : metricLabel} z-score`}
             value={zscore ? fmtNum(zscore.zscore, 2) : "—"}
             sub={zscore ? `Trailing mean ${fmtNum(zscore.trailing_mean, 2)}` : "Needs 3+ sessions"}
+            hint="How many standard deviations today's reading is from its own trailing average — is this normal or unusual for this name specifically."
           />
           <StatCard label="Sessions recorded" value={String(sessionCount)} sub={symbol} />
         </div>

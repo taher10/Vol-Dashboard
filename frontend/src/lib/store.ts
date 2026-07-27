@@ -28,6 +28,7 @@ interface SettingsState {
 
   setSymbols: (symbols: string[]) => void;
   toggleSymbol: (symbol: string) => void;
+  setPrimary: (symbol: string) => void;
   setIntent: (intent: Intent) => void;
   setTargetDelta: (v: number) => void;
   setDeltaTolerance: (v: number) => void;
@@ -64,6 +65,11 @@ export const useSettingsStore = create<SettingsState>()(
           ? current.filter((s) => s !== symbol)
           : [...current, symbol];
         set({ symbols: next.length ? next : ["SPX"] });
+      },
+      setPrimary: (symbol) => {
+        const current = get().symbols;
+        if (!current.includes(symbol) || current[0] === symbol) return;
+        set({ symbols: [symbol, ...current.filter((s) => s !== symbol)] });
       },
       setIntent: (intent) => set({ intent }),
       setTargetDelta: (targetDelta) => set({ targetDelta }),

@@ -3,6 +3,7 @@
 import { SlidersHorizontal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { InfoHint } from "@/components/info-hint";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import {
@@ -56,7 +57,10 @@ export function SettingsDrawer() {
 
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Target delta</Label>
+                <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+                  Target delta
+                  <InfoHint text="The option 'moneyness' you're aiming for, roughly 0.25 ≈ a common OTM strike. Drives the Strike Selector/Decision Screener's delta-fit scoring." />
+                </Label>
                 <span className="font-mono text-xs tabular-nums">{s.targetDelta.toFixed(2)}</span>
               </div>
               <Slider
@@ -70,7 +74,10 @@ export function SettingsDrawer() {
 
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Delta tolerance</Label>
+                <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+                  Delta tolerance
+                  <InfoHint text="How far from your target delta a contract can be and still score well — a delta-fit score of 0 at target ± this value." />
+                </Label>
                 <span className="font-mono text-xs tabular-nums">{s.deltaTolerance.toFixed(2)}</span>
               </div>
               <Slider
@@ -88,13 +95,31 @@ export function SettingsDrawer() {
           <section className="flex flex-col gap-3">
             <h3 className="text-sm font-semibold text-foreground">Score weights</h3>
             {[
-              { key: "value" as const, label: "Value", value: s.weightValue },
-              { key: "deltaFit" as const, label: "Delta fit", value: s.weightDeltaFit },
-              { key: "liquidity" as const, label: "Liquidity", value: s.weightLiquidity },
+              {
+                key: "value" as const,
+                label: "Value",
+                value: s.weightValue,
+                hint: "How much to weight cheap/rich-vs-smile pricing in the composite score.",
+              },
+              {
+                key: "deltaFit" as const,
+                label: "Delta fit",
+                value: s.weightDeltaFit,
+                hint: "How much to weight closeness to your target delta in the composite score.",
+              },
+              {
+                key: "liquidity" as const,
+                label: "Liquidity",
+                value: s.weightLiquidity,
+                hint: "How much to weight tight spreads, volume, and open interest in the composite score.",
+              },
             ].map((w) => (
               <div key={w.key} className="flex flex-col gap-2">
                 <div className="flex items-center justify-between">
-                  <Label className="text-xs text-muted-foreground">{w.label}</Label>
+                  <Label className="flex items-center gap-1 text-xs text-muted-foreground">
+                    {w.label}
+                    <InfoHint text={w.hint} />
+                  </Label>
                   <span className="font-mono text-xs tabular-nums">{w.value.toFixed(2)}</span>
                 </div>
                 <Slider
