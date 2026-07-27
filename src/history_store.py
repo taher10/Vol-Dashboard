@@ -167,6 +167,20 @@ class HistoryStore:
             ).fetchall()
         return [date.fromisoformat(r[0]) for r in rows]
 
+    def metric_series(
+        self, symbol: str, metric_col: str, target_dte: int = 30, lookback_days: int = 365
+    ) -> pd.DataFrame:
+        """
+        Public entry point for the full constant-~target_dte time series of
+        `metric_col` (atm_iv/skew/curvature/realized_vol/vrp) for `symbol` --
+        one row per stored snapshot_date -- for plotting a historical trend
+        chart. iv_rank()/trailing_zscore() reduce this same series to a
+        single current-day stat; this returns the whole thing.
+        """
+        if metric_col not in _METRIC_COLUMNS:
+            raise ValueError(f"Unknown metric column: {metric_col!r}")
+        return self._nearest_dte_series(symbol, target_dte, lookback_days, metric_col)
+
     def _nearest_dte_series(
         self, symbol: str, target_dte: int, lookback_days: int, metric_col: str
     ) -> pd.DataFrame:

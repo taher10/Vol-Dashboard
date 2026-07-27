@@ -1,0 +1,133 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* Ported 1:1 from src/dashboard/chart_components.py's already-validated
+     palette so the web charts and the existing Streamlit/static charts
+     read as the same product. */
+  --background: #fcfcfb;
+  --foreground: #0b0b0b;
+  --card: #ffffff;
+  --card-foreground: #0b0b0b;
+  --popover: #ffffff;
+  --popover-foreground: #0b0b0b;
+  --primary: #2a78d6;
+  --primary-foreground: #ffffff;
+  --secondary: #f4f4f2;
+  --secondary-foreground: #0b0b0b;
+  --muted: #f4f4f2;
+  --muted-foreground: #898781;
+  --accent: #eaf2fb;
+  --accent-foreground: #14315c;
+  --destructive: #d03b3b;
+  --border: #e1e0d9;
+  --input: #e1e0d9;
+  --ring: #2a78d6;
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --radius: 0.625rem;
+  --sidebar: #0f1720;
+  --sidebar-foreground: #e5e9ef;
+  --sidebar-primary: #2a78d6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1b2530;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #1f2a37;
+  --sidebar-ring: #2a78d6;
+}
+
+.dark {
+  --background: #0b0d10;
+  --foreground: #e5e9ef;
+  --card: #12151a;
+  --card-foreground: #e5e9ef;
+  --popover: #12151a;
+  --popover-foreground: #e5e9ef;
+  --primary: #5b9ce6;
+  --primary-foreground: #0b0d10;
+  --secondary: #1a1e24;
+  --secondary-foreground: #e5e9ef;
+  --muted: #1a1e24;
+  --muted-foreground: #9aa0a6;
+  --accent: #182233;
+  --accent-foreground: #cfe0f7;
+  --destructive: #e05a5a;
+  --border: #22262c;
+  --input: #22262c;
+  --ring: #5b9ce6;
+  --chart-1: #5b9ce6;
+  --chart-2: #f08a5d;
+  --chart-3: #3fd39a;
+  --chart-4: #f0b93d;
+  --chart-5: #ef9dbd;
+  --sidebar: #0c1015;
+  --sidebar-foreground: #e5e9ef;
+  --sidebar-primary: #5b9ce6;
+  --sidebar-primary-foreground: #0b0d10;
+  --sidebar-accent: #182233;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #1c232c;
+  --sidebar-ring: #5b9ce6;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

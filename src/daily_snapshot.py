@@ -34,6 +34,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from src.data_quality import LiveDataUnavailableError
 from src.history_store import HistoryStore
 from src.job import OptionsVolJob
 from src.symbols import SYMBOL_REGISTRY
@@ -70,6 +71,12 @@ def run(symbols: list[str]) -> dict[str, str]:
             n_rows = store.append_snapshot(symbol, snapshot_date, metrics)
             results[symbol] = "ok"
             logger.info("%s: appended %d expiration rows to history", symbol, n_rows)
+        except LiveDataUnavailableError as exc:
+            # Expected/benign, not a real failure: job.py already declined to
+            # overwrite the last good snapshot with this one, so there's
+            # nothing new to append to history today, but nothing was lost either.
+            results[symbol] = f"skipped (live data unavailable): {exc}"
+            logger.info("%s: live data unavailable, skipping today's history append", symbol)
         except Exception as exc:
             results[symbol] = str(exc)
             logger.exception("%s: failed", symbol)
@@ -94,5 +101,7 @@ if __name__ == "__main__":
     for symbol, status in results.items():
         print(f"  {symbol:6s}: {status}")
 
-    if all(status != "ok" for status in results.values()):
+    # "skipped (live data unavailable)" is expected/benign (see LiveDataUnavailableError
+    # handling above), not a failure -- only exit non-zero if every symbol hit a real error.
+    if all(status != "ok" and not status.startswith("skipped") for status in results.values()):
         sys.exit(1)

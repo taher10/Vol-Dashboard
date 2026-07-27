@@ -37,9 +37,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from src.auth import SchwabAuth
+from src.data_quality import LiveDataUnavailableError, is_chain_usable
 from src.data_store import CSVStore
 from src.metrics import VolatilityMetrics
 from src.options_fetcher import OptionsFetcher
+from src.schwab_database import SchwabDatabase
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,6 +99,7 @@ class OptionsVolJob:
         self._auth = SchwabAuth.from_env()
         # CSVStore uses a day-based filename key, so reruns on the same UTC day overwrite.
         self._store = CSVStore(symbol=save_symbol, base_dir=data_dir)
+        self._db = SchwabDatabase()
 
     # ------------------------------------------------------------------
     # Primary entry point
@@ -127,6 +130,23 @@ class OptionsVolJob:
         logger.info("Chain: %d contracts, %d expirations",
                     len(chain), chain["expiration"].nunique())
 
+        if not is_chain_usable(chain):
+            # Schwab returns -999 for impliedVolatility/Greeks when it has no
+            # live quote to compute them from (confirmed: happens on pulls
+            # outside regular market hours) -- saving this would silently
+            # overwrite the last good snapshot with an all-garbage one, and
+            # every downstream metric would come back NaN. Leave whatever
+            # was saved before untouched and surface a clear, catchable
+            # error instead so callers (the web app's refresh button, the
+            # daily GitHub Actions job) can tell the user/log "live data
+            # unavailable, still showing the last good snapshot" rather than
+            # either crashing or quietly serving garbage.
+            raise LiveDataUnavailableError(
+                f"Live pull for {self.save_symbol} returned no usable quotes "
+                f"(Schwab's no-quote sentinel on impliedVolatility) -- likely outside "
+                f"market hours. Keeping the last saved snapshot."
+            )
+
         logger.info("Fetching price history ...")
         prices = fetcher.fetch_price_history()
         logger.info("Prices: %d rows (%s → %s)",
@@ -137,6 +157,14 @@ class OptionsVolJob:
         # 3. Persist raw
         self._store.save_chain(chain)
         self._store.save_price_history(prices)
+
+        # 3b. Persist raw into the accumulating Schwab Database (options +
+        # stock_prices tables) -- see src/schwab_database.py. Only reached
+        # once the chain has passed the usability check above, so this
+        # table never accumulates garbage -999 rows either.
+        snapshot_date = datetime.now(UTC).date()
+        self._db.append_options_snapshot(self.save_symbol, snapshot_date, chain)
+        self._db.append_price_history(self.save_symbol, prices)
 
         # 4. Compute metrics
         logger.info("Computing volatility metrics ...")

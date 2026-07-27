@@ -7,6 +7,16 @@ name: Daily vol snapshot
 # src/history_store.py's docstring for why a committed SQLite file rather
 # than a hosted database.
 #
+# Also commits database/schwab_database.db -- the raw per-contract options
+# chain and daily close prices (see src/schwab_database.py), populated as a
+# side effect of the same OptionsVolJob.run() call this workflow already
+# makes. This table is much larger than vol_history.db's compact per-expiry
+# metrics (roughly 1,000+ rows/symbol/day vs. ~16), so watch repo size over
+# time -- revisit with a retention window or Git LFS if it becomes a
+# problem. A live pull with no usable quotes (outside market hours) raises
+# LiveDataUnavailableError and neither file gets touched that day -- see
+# src/data_quality.py.
+#
 # Requires these repo secrets (Settings -> Secrets and variables -> Actions),
 # same values as the Streamlit Cloud secrets -- see README.md:
 #   SCHWAB_API_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL, SCHWAB_TOKEN_B64
@@ -55,6 +65,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add history/vol_history.db
+          git add history/vol_history.db database/schwab_database.db
           git diff --staged --quiet || git commit -m "Daily vol snapshot $(date -u +%F)"
           git push
