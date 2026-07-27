@@ -106,6 +106,7 @@ export interface ExpiryScoreRow {
 
 export interface SymbolOverview {
   color: string;
+  underlying_price: number | null;
   term_structure: TermStructurePoint[];
   skew: SkewPoint[];
   curvature: CurvaturePoint[];
@@ -138,6 +139,7 @@ export interface ExpiryResponse {
   symbol: string;
   expiration: string;
   expirations: ExpiryOption[];
+  underlying_price: number | null;
   smile: SmilePoint[];
   score: ExpiryScoreRow | null;
   neighbors: (ExpiryScoreRow & { position: string })[];
@@ -251,8 +253,12 @@ export const api = {
 
   ivRank: (symbol: string) => apiGet<IVRank | null>(`/api/history/${symbol}/iv-rank`),
 
-  zscore: (symbol: string, metric: string) =>
-    apiGet<ZScore | null>(`/api/history/${symbol}/zscore`, { metric }),
+  zscore: (symbol: string, metric: string, targetDte?: number, lookbackDays?: number) =>
+    apiGet<ZScore | null>(`/api/history/${symbol}/zscore`, {
+      metric,
+      target_dte: targetDte,
+      lookback_days: lookbackDays,
+    }),
 
   priceSeries: (symbol: string, start?: string, end?: string) =>
     apiGet<{ symbol: string; prices: PriceBar[] }>(`/api/history/${symbol}/price-series`, { start, end }),

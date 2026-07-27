@@ -3,7 +3,6 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
 import { AppSidebar } from "@/components/app-sidebar";
-import { SymbolRouteSync } from "@/components/symbol-route-sync";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const geistSans = Geist({
@@ -33,7 +32,6 @@ export default function RootLayout({
     >
       <body className="h-full">
         <TooltipProvider delayDuration={150}>
-          <SymbolRouteSync />
           <div className="flex h-screen overflow-hidden bg-background">
             <AppSidebar />
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</div>

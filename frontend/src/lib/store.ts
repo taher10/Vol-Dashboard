@@ -51,7 +51,13 @@ export const useSettingsStore = create<SettingsState>()(
       weightValue: 0.4,
       weightDeltaFit: 0.3,
       weightLiquidity: 0.3,
-      dteRange: [0, 730],
+      // 7-90 DTE by default: the tradeable, liquid window most vol strategies
+      // actually operate in. The takeaway/Decision Screener rank whatever's in
+      // this window as one comparable set -- a 730-day default blended weekly
+      // premium-selling candidates with LEAPS-dated ones in the same ranked
+      // list, which isn't a real choice a trader would weigh against itself.
+      // The full 0-730 range is still available by widening the slider.
+      dteRange: [7, 90],
       optionTypes: "BOTH",
       minVolume: 0,
       minOpenInterest: 0,

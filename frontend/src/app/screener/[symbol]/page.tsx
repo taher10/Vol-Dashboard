@@ -118,6 +118,12 @@ export default function DecisionScreenerPage() {
           </div>
         )}
 
+        {overview?.symbols[symbol]?.underlying_price != null && (
+          <p className="mb-4 font-mono text-sm tabular-nums text-muted-foreground">
+            Spot ${fmtNum(overview.symbols[symbol].underlying_price, 2)}
+          </p>
+        )}
+
         <div className="flex flex-col gap-4">
           <ChartCard title="Expiry Context" bodyClassName="p-0 pt-3">
             <div className="flex items-center gap-2 px-3 pb-2">

@@ -10,7 +10,7 @@ import { ContractTable } from "@/components/contract-table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, ApiError, type ContractRow, type ExpiryResponse } from "@/lib/api";
-import { fmtDate } from "@/lib/format";
+import { fmtDate, fmtNum } from "@/lib/format";
 import { useSettingsStore } from "@/lib/store";
 
 export default function StrikeSelectorPage() {
@@ -137,6 +137,12 @@ export default function StrikeSelectorPage() {
               <SelectItem value="PUT">Put</SelectItem>
             </SelectContent>
           </Select>
+
+          {expiryData?.underlying_price != null && (
+            <span className="flex items-center font-mono text-sm tabular-nums text-muted-foreground">
+              Spot ${fmtNum(expiryData.underlying_price, 2)}
+            </span>
+          )}
         </div>
 
         <div className="flex flex-col gap-4">

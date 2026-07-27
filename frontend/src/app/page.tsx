@@ -120,9 +120,21 @@ export default function OverviewPage() {
         </div>
 
         {data && (
-          <p className="mb-4 text-xs text-muted-foreground">
-            As of {fmtDateTime(data.as_of)} · showing {dteRange[0]}–{dteRange[1]} DTE
-          </p>
+          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span>
+              As of {fmtDateTime(data.as_of)} · showing {dteRange[0]}–{dteRange[1]} DTE
+            </span>
+            <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              {Object.entries(data.symbols).map(([sym, info]) =>
+                info.underlying_price != null ? (
+                  <span key={sym} className="inline-flex items-center gap-1 font-mono tabular-nums">
+                    <span className="size-1.5 rounded-full" style={{ backgroundColor: info.color }} />
+                    {sym} ${fmtNum(info.underlying_price, 2)}
+                  </span>
+                ) : null
+              )}
+            </span>
+          </div>
         )}
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
