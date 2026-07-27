@@ -2,6 +2,16 @@
 
 An SPX options-volatility pipeline and Streamlit dashboard: pull option chains and price history from the Schwab API, compute vol-surface metrics (term structure, skew, curvature, VRP), persist everything to CSV, and explore/score contracts interactively.
 
+## Web app (prototype)
+
+`src/api/` (FastAPI) + `frontend/` (Next.js) is a second, browser-based UI over the same saved snapshot data — a design-first prototype, not a production deployment. It mirrors the Streamlit app's 4 views (Overview, Expiry Drilldown, Strike Selector, Decision Screener) as a real web UI, reusing the existing scoring/metrics code with no logic duplicated. Quick start:
+
+```bash
+./dev.sh   # backend on :8000, frontend on :3000 — requires .venv and frontend/node_modules already installed
+```
+
+It deliberately has no auth, no live "refresh data" action (refreshing stays an owner-run/GitHub Actions job, same as today), and no hosting/deployment set up yet — and it does not resolve whether redistributing a Schwab-sourced feed to unrelated third-party users complies with Schwab's API terms of use, which the longer-term "single shared public feed" direction will need to address. See `frontend/README.md` for the full write-up (architecture, endpoints, setup, and scope/limitations in detail).
+
 ## How it fits together
 
 ```

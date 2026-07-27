@@ -16,3 +16,7 @@ python-dotenv>=1.0.0
 
 # Utilities
 httpx>=0.26.0
+
+# Web API (src/api/)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0

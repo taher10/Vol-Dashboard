@@ -69,6 +69,12 @@ class CSVStore:
         """Sorted list of all chain snapshot paths."""
         return sorted(self._raw_dir.glob(f"{self.symbol}_chain_*.csv"))
 
+    def load_chain_snapshot(self, path: Path) -> pd.DataFrame:
+        """Load one specific chain snapshot file (e.g. from list_snapshots()) --
+        a public entry point for callers that need to walk through history
+        rather than always loading the single latest one."""
+        return self._read_csv(path)
+
     # ------------------------------------------------------------------
     # Price history
     # ------------------------------------------------------------------
@@ -84,6 +90,20 @@ class CSVStore:
     def load_latest_price_history(self) -> pd.DataFrame:
         """Load the most recent price history snapshot."""
         return self._read_csv(self._latest("prices"))
+
+    def load_price_history_at(self, day_stamp: str) -> pd.DataFrame:
+        """Load the price-history file for a specific YYYYMMDD day stamp
+        (see day_stamp_from_snapshot -- lets a caller line up a specific
+        historical chain snapshot with its same-day price file)."""
+        path = self._raw_dir / f"{self.symbol}_prices_{day_stamp}.csv"
+        if not path.exists():
+            raise FileNotFoundError(f"No price history for '{self.symbol}' at day stamp {day_stamp}.")
+        return self._read_csv(path)
+
+    def day_stamp_from_snapshot(self, path: Path) -> str:
+        """Extract the YYYYMMDD day stamp from a chain snapshot path (as returned by list_snapshots())."""
+        prefix = f"{self.symbol}_chain_"
+        return path.stem[len(prefix):] if path.stem.startswith(prefix) else path.stem
 
     # ------------------------------------------------------------------
     # Computed metrics
