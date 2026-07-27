@@ -30,7 +30,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 
-from src.auth import write_token_from_base64
+from src.auth import InvalidTokenSecretError, write_token_from_base64
 from src.dashboard import chart_components, data_loader, decision_engine
 from src.dashboard.data_loader import SnapshotBundle
 from src.dashboard.decision_engine import ContractFilters, ScoreWeights
@@ -75,7 +75,17 @@ def _bootstrap_secrets() -> None:
 
     b64 = os.environ.get("SCHWAB_TOKEN_B64", "")
     if b64:
-        write_token_from_base64(b64)
+        try:
+            write_token_from_base64(b64)
+        except InvalidTokenSecretError as exc:
+            # Runs before st.set_page_config() (which Streamlit requires to be
+            # the first st.* call in the script), so this can't render a
+            # st.error() here -- print so it's at least visible in server
+            # logs, and let the existing "no token" handling downstream
+            # (render_sidebar's Refresh Live Data button, load_snapshot_safely)
+            # surface a friendly in-page message the way a missing token
+            # already does.
+            print(f"[app._bootstrap_secrets] SCHWAB_TOKEN_B64 invalid, skipping: {exc}")
 
 
 _bootstrap_secrets()
