@@ -123,9 +123,14 @@ class OptionsVolJob:
         # 2. Fetch
         fetcher = OptionsFetcher(client, symbol=self.symbol)
 
-        logger.info("Fetching monthly options chain (±%d strikes ATM per expiry) ...", self.strikes_each_side)
+        logger.info(
+            "Fetching options chain (weekly through 60d + monthly beyond, ±%d strikes ATM per expiry) ...",
+            self.strikes_each_side,
+        )
         chain = fetcher.fetch_monthly_chain(
-            strikes_each_side=self.strikes_each_side, strike_increment=self.strike_increment
+            strikes_each_side=self.strikes_each_side,
+            strike_increment=self.strike_increment,
+            weekly_through_days=60,
         )
         logger.info("Chain: %d contracts, %d expirations",
                     len(chain), chain["expiration"].nunique())

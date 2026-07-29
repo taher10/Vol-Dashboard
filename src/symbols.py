@@ -42,7 +42,10 @@ class SymbolInfo:
                          app's pre-existing single-symbol default color.
                          Order/hues from the dataviz skill's validated
                          8-color categorical palette (references/palette.md),
-                         used unmodified.
+                         used unmodified. That palette is only validated for
+                         8 slots -- a 9th color is never a genuinely new,
+                         CVD-safe hue, so symbols past the 8th cycle back
+                         through the same 8 rather than inventing one.
     """
 
     api_symbol: str
@@ -60,4 +63,18 @@ SYMBOL_REGISTRY: dict[str, SymbolInfo] = {
     "NVDA":  SymbolInfo("NVDA", None, 20, "#008300"),  # slot 6 green
     "META":  SymbolInfo("META", None, 20, "#4a3aa7"),  # slot 7 violet
     "TSLA":  SymbolInfo("TSLA", None, 20, "#e34948"),  # slot 8 red
+    # Past 8, cycle the same validated hues rather than inventing new ones
+    # (see SymbolInfo.color docstring above).
+    "MU":    SymbolInfo("MU", None, 20, "#2a78d6"),    # slot 1 blue (cycled)
+    "AMD":   SymbolInfo("AMD", None, 20, "#eb6834"),   # slot 2 orange (cycled)
+    "MRVL":  SymbolInfo("MRVL", None, 20, "#1baf7a"),  # slot 3 aqua (cycled)
+    "SNDK":  SymbolInfo("SNDK", None, 20, "#eda100"),  # slot 4 yellow (cycled)
+    "COHR":  SymbolInfo("COHR", None, 20, "#e87ba4"),  # slot 5 magenta (cycled)
+    "BE":    SymbolInfo("BE", None, 20, "#008300"),    # slot 6 green (cycled)
+    "SPCX":  SymbolInfo("SPCX", None, 20, "#4a3aa7"),  # slot 7 violet (cycled)
+    "NBIS":  SymbolInfo("NBIS", None, 20, "#e34948"),  # slot 8 red (cycled)
+    "PLTR":  SymbolInfo("PLTR", None, 20, "#2a78d6"),  # slot 1 blue (cycled)
+    "JPM":   SymbolInfo("JPM", None, 20, "#eb6834"),   # slot 2 orange (cycled)
+    "LITE":  SymbolInfo("LITE", None, 20, "#1baf7a"),  # slot 3 aqua (cycled)
+    "NFLX":  SymbolInfo("NFLX", None, 20, "#eda100"),  # slot 4 yellow (cycled)
 }

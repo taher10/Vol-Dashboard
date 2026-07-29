@@ -6,41 +6,19 @@ dashboard. No Streamlit, no network I/O — every function here takes and
 returns DataFrames so it can be unit-tested standalone against the CSVs in
 data/raw and data/processed.
 
-Two independent scoring surfaces:
-  score_expiries   "which expiry looks interesting" — term structure + VRP
-                    richness + smile-wing bias, one row per (expiration, dte).
-  score_contracts   "which specific contract to trade" — a 0-100 composite of
-                    liquidity, delta fit to a target, and cheap/rich-vs-smile
-                    value, one row per contract in the chain.
+score_expiries: "which expiry looks interesting" — term structure + VRP
+richness + smile-wing bias, one row per (expiration, dte). Feeds Overview's
+richness table and build_takeaway() below. (Contract-level strike selection
+now lives entirely in strategy_engine.py's recommend_trade().)
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import pandas as pd
 
 JOIN_KEYS = ["expiration", "dte"]
-GROUP_COLS = ["expiration", "optionType"]
 _Z_THRESHOLD = 0.5
-
-
-@dataclass
-class ScoreWeights:
-    value: float = 0.4
-    delta_fit: float = 0.3
-    liquidity: float = 0.3
-
-
-@dataclass
-class ContractFilters:
-    dte_range: tuple[int, int] = (0, 730)
-    option_types: tuple[str, ...] = ("CALL", "PUT")
-    min_volume: int = 0
-    min_open_interest: int = 0
-    max_spread_pct: float = 25.0
 
 
 # ----------------------------------------------------------------------
@@ -126,190 +104,6 @@ def score_expiries(metrics: dict[str, pd.DataFrame]) -> pd.DataFrame:
     df["has_wing_data"] = df["skew"].notna() & df["curvature"].notna()
 
     return df.sort_values("dte").reset_index(drop=True)
-
-
-# ----------------------------------------------------------------------
-# Contract-level scoring
-# ----------------------------------------------------------------------
-
-
-def _apply_filters(chain: pd.DataFrame, filters: ContractFilters) -> pd.DataFrame:
-    """Apply ContractFilters (including the derived mid/spread_pct gate) before any scoring happens."""
-    df = chain.copy()
-
-    lo, hi = filters.dte_range
-    df = df[(df["dte"] >= lo) & (df["dte"] <= hi)]
-    df = df[df["optionType"].isin(filters.option_types)]
-    df = df[df["volume"].fillna(0) >= filters.min_volume]
-    df = df[df["openInterest"].fillna(0) >= filters.min_open_interest]
-
-    df["mid"] = (df["bid"] + df["ask"]) / 2.0
-    df = df[df["mid"] > 0]  # guard: a non-positive mid makes spread_pct undefined/meaningless
-    df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"] * 100.0
-    df = df[df["spread_pct"] <= filters.max_spread_pct]
-
-    return df
-
-
-def _liquidity_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """Within-(expiration, optionType) percentile blend: tight spread + high volume + high OI."""
-    g = df.groupby(GROUP_COLS)
-    spread_pctile = g["spread_pct"].rank(pct=True) * 100
-    volume_pctile = g["volume"].rank(pct=True) * 100
-    oi_pctile = g["openInterest"].rank(pct=True) * 100
-    df["liquidity_score"] = 0.5 * (100 - spread_pctile) + 0.25 * volume_pctile + 0.25 * oi_pctile
-    return df
-
-
-def _delta_fit_scores(df: pd.DataFrame, target_delta: float, delta_tolerance: float) -> pd.DataFrame:
-    """Linear falloff from 100 at exactly target_delta to 0 at target_delta +/- delta_tolerance."""
-    df["delta_fit_score"] = (
-        100 * (1 - (df["delta"].abs() - target_delta).abs() / delta_tolerance)
-    ).clip(lower=0)
-    return df
-
-
-def _value_scores(df: pd.DataFrame, intent: Literal["buy", "sell"]) -> pd.DataFrame:
-    """
-    Fit a degree-2 IV(|delta|) smile per (expiration, optionType) group and rank
-    contracts by how far they sit below (buy) / above (sell) that local fit —
-    i.e. cheap or rich relative to their own smile's neighbors, not to some
-    global average. Groups with <3 valid (delta, IV) points can't support a
-    quadratic fit, so value_score is left NaN for the whole group.
-    """
-    df["value_score"] = np.nan
-    for _, idx in df.groupby(GROUP_COLS).groups.items():
-        sub = df.loc[idx]
-        valid = sub.dropna(subset=["delta", "impliedVolatility"])
-        if len(valid) < 3:
-            continue
-        abs_delta = valid["delta"].abs().to_numpy()
-        iv = valid["impliedVolatility"].to_numpy()
-        coeffs = np.polyfit(abs_delta, iv, 2)
-        fitted = np.polyval(coeffs, abs_delta)
-        smile_residual = pd.Series(iv - fitted, index=valid.index)
-        rank_input = -smile_residual if intent == "buy" else smile_residual
-        df.loc[valid.index, "value_score"] = rank_input.rank(pct=True) * 100
-    return df
-
-
-def _composite_scores(df: pd.DataFrame, weights: ScoreWeights) -> pd.DataFrame:
-    """
-    Weighted blend of value/delta_fit/liquidity. When value_score is NaN
-    (illiquid smile group) we renormalize over delta_fit+liquidity rather than
-    letting a missing value_score silently zero the contract out of contention.
-    """
-    has_value = df["value_score"].notna()
-    composite = pd.Series(np.nan, index=df.index, dtype=float)
-
-    composite.loc[has_value] = (
-        weights.value * df.loc[has_value, "value_score"]
-        + weights.delta_fit * df.loc[has_value, "delta_fit_score"]
-        + weights.liquidity * df.loc[has_value, "liquidity_score"]
-    )
-
-    fallback_denom = weights.delta_fit + weights.liquidity
-    no_value = ~has_value
-    if fallback_denom > 0:
-        composite.loc[no_value] = (
-            weights.delta_fit * df.loc[no_value, "delta_fit_score"]
-            + weights.liquidity * df.loc[no_value, "liquidity_score"]
-        ) / fallback_denom
-
-    df["composite_score"] = composite
-    return df
-
-
-_SCORED_COLUMNS = [
-    "mid", "spread_pct", "liquidity_score", "delta_fit_score",
-    "value_score", "composite_score", "rank",
-]
-
-
-def score_contracts(
-    chain: pd.DataFrame,
-    intent: Literal["buy", "sell"] = "buy",
-    target_delta: float = 0.25,
-    delta_tolerance: float = 0.15,
-    weights: ScoreWeights = ScoreWeights(),
-    filters: ContractFilters = ContractFilters(),
-) -> pd.DataFrame:
-    """
-    Filter `chain` by `filters`, then score each surviving contract 0-100 on
-    liquidity, fit to `target_delta`, and (when the local smile supports it)
-    cheap/rich value for the given `intent`. Returns the filtered+scored rows
-    sorted by composite_score descending with a 1-based `rank` column.
-    """
-    df = _apply_filters(chain, filters)
-
-    if df.empty:
-        return df.assign(**{col: pd.Series(dtype="float64") for col in _SCORED_COLUMNS})
-
-    df = _liquidity_scores(df)
-    df = _delta_fit_scores(df, target_delta, delta_tolerance)
-    df = _value_scores(df, intent)
-    df = _composite_scores(df, weights)
-
-    df = df.sort_values("composite_score", ascending=False, na_position="last").reset_index(drop=True)
-    df["rank"] = np.arange(1, len(df) + 1)
-    return df
-
-
-def top_candidates(scored: pd.DataFrame, n: int = 10) -> pd.DataFrame:
-    """Convenience: the top n rows of an already-scored/sorted DataFrame."""
-    return scored.head(n)
-
-
-def liquidity_near_delta(
-    chain: pd.DataFrame,
-    target_delta: float,
-    delta_tolerance: float,
-    thin_oi_threshold: int = 100,
-) -> dict | None:
-    """
-    Quick open-interest gut-check for whatever's currently quoted within
-    delta_tolerance of target_delta, across the whole chain (every expiry
-    and side) -- not full contract scoring, just "is there real open
-    interest anywhere near this delta, or would a 'buy the 0.25 delta'
-    intent point at a strike no one's actually holding." OI only, not
-    volume: this data source's `volume` field reads 0 on every contract
-    regardless of actual liquidity, so it's not a usable signal here.
-
-    Returns None if there's no chain data or nothing quoted in range
-    (distinct from "found contracts, they're just thin" -- that's
-    is_thin=True on a real result).
-
-    Distinguishes two very different situations that both look like
-    "median OI is low": genuinely thin liquidity near this delta
-    specifically vs. this symbol's feed not reporting openInterest at all
-    (confirmed: SPX's openInterest reads exactly 0 on literally every
-    contract in the chain, not just near-the-money ones, while AAPL has
-    real varied OI up to 75k+ -- an index-options data-source gap, not a
-    liquidity signal). data_unavailable=True means "we have no OI data to
-    judge this on," not "this is illiquid" -- a warning phrased as the
-    latter would be wrong and would fire on every single SPX view.
-    """
-    if chain is None or chain.empty or "delta" not in chain.columns or "openInterest" not in chain.columns:
-        return None
-    df = chain.dropna(subset=["delta", "openInterest"]).copy()
-    if df.empty:
-        return None
-    data_unavailable = (df["openInterest"] == 0).all()
-
-    df["abs_delta"] = df["delta"].abs()
-    near = df[(df["abs_delta"] - target_delta).abs() <= delta_tolerance]
-    if near.empty:
-        return None
-    median_oi = float(near["openInterest"].median())
-    return {
-        "n_contracts": len(near),
-        "median_oi": median_oi,
-        "min_oi": int(near["openInterest"].min()),
-        "max_oi": int(near["openInterest"].max()),
-        "pct_thin": float((near["openInterest"] < thin_oi_threshold).mean() * 100),
-        "is_thin": median_oi < thin_oi_threshold and not data_unavailable,
-        "data_unavailable": data_unavailable,
-    }
 
 
 def build_takeaway(
