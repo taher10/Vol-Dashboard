@@ -1,43 +1,22 @@
 /**
- * Shared settings store — the web equivalent of src/dashboard/app.py's
- * AppConfig/render_sidebar(), persisted to localStorage so it survives a
- * refresh (Streamlit's st.session_state equivalent, but durable).
+ * Shared settings store — symbols and the shared viewing window (DTE range),
+ * persisted to localStorage so they survive a refresh and stay in sync
+ * across every page.
  */
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type Intent = "buy" | "sell";
-export type OptionTypeFilter = "BOTH" | "CALL" | "PUT";
-
 interface SettingsState {
   symbols: string[];
-  intent: Intent;
-  targetDelta: number;
-  deltaTolerance: number;
-  weightValue: number;
-  weightDeltaFit: number;
-  weightLiquidity: number;
   dteRange: [number, number];
-  optionTypes: OptionTypeFilter;
-  minVolume: number;
-  minOpenInterest: number;
-  maxSpreadPct: number;
   /** Bumped after a successful live-data refresh so pages can refetch. Not meaningful on its own. */
   refreshNonce: number;
 
   setSymbols: (symbols: string[]) => void;
   toggleSymbol: (symbol: string) => void;
   setPrimary: (symbol: string) => void;
-  setIntent: (intent: Intent) => void;
-  setTargetDelta: (v: number) => void;
-  setDeltaTolerance: (v: number) => void;
-  setWeights: (v: { value?: number; deltaFit?: number; liquidity?: number }) => void;
   setDteRange: (range: [number, number]) => void;
-  setOptionTypes: (v: OptionTypeFilter) => void;
-  setMinVolume: (v: number) => void;
-  setMinOpenInterest: (v: number) => void;
-  setMaxSpreadPct: (v: number) => void;
   bumpRefreshNonce: () => void;
 }
 
@@ -45,17 +24,13 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       symbols: ["SPX"],
-      intent: "buy",
-      targetDelta: 0.25,
-      deltaTolerance: 0.15,
-      weightValue: 0.4,
-      weightDeltaFit: 0.3,
-      weightLiquidity: 0.3,
-      dteRange: [0, 730],
-      optionTypes: "BOTH",
-      minVolume: 0,
-      minOpenInterest: 0,
-      maxSpreadPct: 25,
+      // 7-90 DTE by default: the tradeable, liquid window most vol strategies
+      // actually operate in. The takeaway/Strategy Builder treat whatever's in
+      // this window as one comparable set -- a 730-day default blended weekly
+      // premium-selling candidates with LEAPS-dated ones in the same ranked
+      // list, which isn't a real choice a trader would weigh against itself.
+      // The full 0-730 range is still available by widening the slider.
+      dteRange: [7, 90],
       refreshNonce: 0,
 
       setSymbols: (symbols) => set({ symbols: symbols.length ? symbols : ["SPX"] }),
@@ -71,20 +46,7 @@ export const useSettingsStore = create<SettingsState>()(
         if (!current.includes(symbol) || current[0] === symbol) return;
         set({ symbols: [symbol, ...current.filter((s) => s !== symbol)] });
       },
-      setIntent: (intent) => set({ intent }),
-      setTargetDelta: (targetDelta) => set({ targetDelta }),
-      setDeltaTolerance: (deltaTolerance) => set({ deltaTolerance }),
-      setWeights: ({ value, deltaFit, liquidity }) =>
-        set((s) => ({
-          weightValue: value ?? s.weightValue,
-          weightDeltaFit: deltaFit ?? s.weightDeltaFit,
-          weightLiquidity: liquidity ?? s.weightLiquidity,
-        })),
       setDteRange: (dteRange) => set({ dteRange }),
-      setOptionTypes: (optionTypes) => set({ optionTypes }),
-      setMinVolume: (minVolume) => set({ minVolume }),
-      setMinOpenInterest: (minOpenInterest) => set({ minOpenInterest }),
-      setMaxSpreadPct: (maxSpreadPct) => set({ maxSpreadPct }),
       bumpRefreshNonce: () => set((s) => ({ refreshNonce: s.refreshNonce + 1 })),
     }),
     { name: "vol-dashboard-settings" }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { Check, ChevronsUpDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -14,8 +15,11 @@ import {
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api, type SymbolInfo } from "@/lib/api";
+import { NAV } from "@/lib/nav";
 import { primarySymbol, useSettingsStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
+
+const SYMBOL_SCOPED_BASES = NAV.filter((item) => item.symbolScoped).map((item) => item.href);
 
 export function SymbolPicker() {
   const [open, setOpen] = useState(false);
@@ -24,6 +28,8 @@ export function SymbolPicker() {
   const toggleSymbol = useSettingsStore((s) => s.toggleSymbol);
   const setPrimary = useSettingsStore((s) => s.setPrimary);
   const primary = primarySymbol(symbols);
+  const pathname = usePathname();
+  const router = useRouter();
 
   useEffect(() => {
     api
@@ -31,6 +37,29 @@ export function SymbolPicker() {
       .then(setAllSymbols)
       .catch(() => setAllSymbols([]));
   }, []);
+
+  // Runs the store mutation, then — only if it's a genuine user action, never
+  // a background/hydration event, since this only ever executes inside a
+  // real click handler — follows the user to the new primary symbol's
+  // version of whatever symbol-scoped page (Expiry/Strategy/History)
+  // they're currently on. An earlier attempt at this used a passive
+  // "watch the store for changes" effect instead; it couldn't reliably tell
+  // zustand's async localStorage rehydration apart from a real user change
+  // and fired a bogus redirect on page load. Driving it from the click
+  // handler itself sidesteps that ambiguity entirely.
+  function applyAndFollow(mutate: () => void) {
+    const before = primarySymbol(useSettingsStore.getState().symbols);
+    mutate();
+    const after = primarySymbol(useSettingsStore.getState().symbols);
+    if (before === after) return;
+
+    const base = SYMBOL_SCOPED_BASES.find((b) => pathname === b || pathname.startsWith(`${b}/`));
+    if (!base) return;
+    const currentSymbol = pathname.slice(base.length + 1).split("/")[0];
+    if (currentSymbol && currentSymbol.toUpperCase() !== after) {
+      router.push(`${base}/${after}`);
+    }
+  }
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -53,11 +82,11 @@ export function SymbolPicker() {
                   onClick={(e) => {
                     if (isPrimary) return;
                     e.stopPropagation();
-                    setPrimary(sym);
+                    applyAndFollow(() => setPrimary(sym));
                   }}
                   title={
                     isPrimary
-                      ? "Primary symbol — drives Expiry Drilldown, Strike Selector, Decision Screener, and History"
+                      ? "Primary symbol — drives Expiry Drilldown, Strategy Builder, and History"
                       : `Click to make ${sym} the primary symbol`
                   }
                   className={cn(
@@ -92,7 +121,7 @@ export function SymbolPicker() {
                   <CommandItem
                     key={info.symbol}
                     value={info.symbol}
-                    onSelect={() => toggleSymbol(info.symbol)}
+                    onSelect={() => applyAndFollow(() => toggleSymbol(info.symbol))}
                   >
                     <span
                       className="size-2 rounded-full"

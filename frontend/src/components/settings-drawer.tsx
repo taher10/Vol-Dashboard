@@ -3,7 +3,6 @@
 import { SlidersHorizontal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { InfoHint } from "@/components/info-hint";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import {
@@ -14,9 +13,6 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { Separator } from "@/components/ui/separator";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { Input } from "@/components/ui/input";
 import { useSettingsStore } from "@/lib/store";
 
 export function SettingsDrawer() {
@@ -33,110 +29,12 @@ export function SettingsDrawer() {
       <SheetContent className="w-full overflow-y-auto sm:max-w-sm">
         <SheetHeader>
           <SheetTitle>Dashboard settings</SheetTitle>
-          <SheetDescription>
-            Shared across every page — trade intent, scoring weights, and contract filters.
-          </SheetDescription>
+          <SheetDescription>Shared across every page.</SheetDescription>
         </SheetHeader>
 
         <div className="flex flex-col gap-6 px-4 pb-6">
           <section className="flex flex-col gap-3">
-            <h3 className="text-sm font-semibold text-foreground">Trade intent</h3>
-            <ToggleGroup
-              type="single"
-              value={s.intent}
-              onValueChange={(v) => v && s.setIntent(v as "buy" | "sell")}
-              className="w-full"
-            >
-              <ToggleGroupItem value="buy" className="flex-1">
-                Buy
-              </ToggleGroupItem>
-              <ToggleGroupItem value="sell" className="flex-1">
-                Sell
-              </ToggleGroupItem>
-            </ToggleGroup>
-
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label className="flex items-center gap-1 text-xs text-muted-foreground">
-                  Target delta
-                  <InfoHint text="The option 'moneyness' you're aiming for, roughly 0.25 ≈ a common OTM strike. Drives the Strike Selector/Decision Screener's delta-fit scoring." />
-                </Label>
-                <span className="font-mono text-xs tabular-nums">{s.targetDelta.toFixed(2)}</span>
-              </div>
-              <Slider
-                min={0.05}
-                max={0.5}
-                step={0.01}
-                value={[s.targetDelta]}
-                onValueChange={([v]) => s.setTargetDelta(v)}
-              />
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label className="flex items-center gap-1 text-xs text-muted-foreground">
-                  Delta tolerance
-                  <InfoHint text="How far from your target delta a contract can be and still score well — a delta-fit score of 0 at target ± this value." />
-                </Label>
-                <span className="font-mono text-xs tabular-nums">{s.deltaTolerance.toFixed(2)}</span>
-              </div>
-              <Slider
-                min={0.05}
-                max={0.3}
-                step={0.01}
-                value={[s.deltaTolerance]}
-                onValueChange={([v]) => s.setDeltaTolerance(v)}
-              />
-            </div>
-          </section>
-
-          <Separator />
-
-          <section className="flex flex-col gap-3">
-            <h3 className="text-sm font-semibold text-foreground">Score weights</h3>
-            {[
-              {
-                key: "value" as const,
-                label: "Value",
-                value: s.weightValue,
-                hint: "How much to weight cheap/rich-vs-smile pricing in the composite score.",
-              },
-              {
-                key: "deltaFit" as const,
-                label: "Delta fit",
-                value: s.weightDeltaFit,
-                hint: "How much to weight closeness to your target delta in the composite score.",
-              },
-              {
-                key: "liquidity" as const,
-                label: "Liquidity",
-                value: s.weightLiquidity,
-                hint: "How much to weight tight spreads, volume, and open interest in the composite score.",
-              },
-            ].map((w) => (
-              <div key={w.key} className="flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <Label className="flex items-center gap-1 text-xs text-muted-foreground">
-                    {w.label}
-                    <InfoHint text={w.hint} />
-                  </Label>
-                  <span className="font-mono text-xs tabular-nums">{w.value.toFixed(2)}</span>
-                </div>
-                <Slider
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={[w.value]}
-                  onValueChange={([v]) => s.setWeights({ [w.key]: v })}
-                />
-              </div>
-            ))}
-          </section>
-
-          <Separator />
-
-          <section className="flex flex-col gap-3">
-            <h3 className="text-sm font-semibold text-foreground">Contract filters</h3>
+            <h3 className="text-sm font-semibold text-foreground">Viewing window</h3>
 
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
@@ -151,61 +49,6 @@ export function SettingsDrawer() {
                 step={1}
                 value={s.dteRange}
                 onValueChange={(v) => s.setDteRange([v[0], v[1]])}
-              />
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <Label className="text-xs text-muted-foreground">Option types</Label>
-              <ToggleGroup
-                type="single"
-                value={s.optionTypes}
-                onValueChange={(v) => v && s.setOptionTypes(v as "BOTH" | "CALL" | "PUT")}
-                className="w-full"
-              >
-                <ToggleGroupItem value="BOTH" className="flex-1">
-                  Both
-                </ToggleGroupItem>
-                <ToggleGroupItem value="CALL" className="flex-1">
-                  Call
-                </ToggleGroupItem>
-                <ToggleGroupItem value="PUT" className="flex-1">
-                  Put
-                </ToggleGroupItem>
-              </ToggleGroup>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label className="text-xs text-muted-foreground">Min volume</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={s.minVolume}
-                  onChange={(e) => s.setMinVolume(Number(e.target.value) || 0)}
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label className="text-xs text-muted-foreground">Min open interest</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={s.minOpenInterest}
-                  onChange={(e) => s.setMinOpenInterest(Number(e.target.value) || 0)}
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Max spread %</Label>
-                <span className="font-mono text-xs tabular-nums">{s.maxSpreadPct.toFixed(0)}%</span>
-              </div>
-              <Slider
-                min={0}
-                max={100}
-                step={1}
-                value={[s.maxSpreadPct]}
-                onValueChange={([v]) => s.setMaxSpreadPct(v)}
               />
             </div>
           </section>

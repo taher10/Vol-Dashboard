@@ -1,10 +1,10 @@
 # Vol Dashboard
 
-An SPX options-volatility pipeline and Streamlit dashboard: pull option chains and price history from the Schwab API, compute vol-surface metrics (term structure, skew, curvature, VRP), persist everything to CSV, and explore/score contracts interactively.
+An SPX/equity options-volatility pipeline and web dashboard: pull option chains and price history from the Schwab API, compute vol-surface metrics (term structure, skew, curvature, VRP), persist everything to CSV/SQLite, and explore contracts and build risk-defined trade structures interactively.
 
-## Web app (prototype)
+## Web app
 
-`src/api/` (FastAPI) + `frontend/` (Next.js) is a second, browser-based UI over the same saved snapshot data — a design-first prototype, not a production deployment. It mirrors the Streamlit app's 4 views (Overview, Expiry Drilldown, Strike Selector, Decision Screener) as a real web UI, reusing the existing scoring/metrics code with no logic duplicated. Quick start:
+`src/api/` (FastAPI) + `frontend/` (Next.js) is the browser-based UI over the saved snapshot data — a design-first prototype, not a production deployment. It has 4 views (Overview, Expiry Drilldown, Strategy Builder, History), reusing the existing pipeline/scoring code with no logic duplicated. Quick start:
 
 ```bash
 ./dev.sh   # backend on :8000, frontend on :3000 — requires .venv and frontend/node_modules already installed
@@ -23,29 +23,14 @@ src/job.py               OptionsVolJob — orchestrates auth -> fetch -> save ->
 src/charts.py            Static matplotlib PNG charts from the latest saved metrics (-> charts/)
 src/debug_session.py     Loads latest CSVs into named DataFrames for REPL/debugger exploration
 
-src/dashboard/app.py               Streamlit multipage entrypoint (Overview) + shared sidebar/config
-src/dashboard/data_loader.py       Plain-Python data access for the dashboard (wraps CSVStore/job)
-src/dashboard/chart_components.py Plotly figure builders (interactive versions of src/charts.py)
-src/dashboard/decision_engine.py   Pure pandas scoring: score_expiries(), score_contracts()
-src/dashboard/pages/
-  1_Expiry_Drilldown.py   Smile + richness/skew/curvature for one expiry
-  2_Strike_Selector.py    Ranked, scored contracts for one expiry/side, highlighted on the smile
-  3_Decision_Screener.py  Top-ranked contracts across the whole filtered chain
+src/dashboard/data_loader.py       Plain-Python data access layer (wraps CSVStore/job) — used by src/api
+src/dashboard/decision_engine.py   Pure pandas: score_expiries() (expiry richness)
+src/dashboard/strategy_engine.py   Pure pandas: recommend_trade() -- one sized vertical spread for a stated direction/timeline/risk/capital
 ```
 
-**Pipeline (`src/job.py`)**: authenticate with Schwab → fetch a monthly option chain (±N strikes around ATM per expiry, `data_dir`/expiry window/strike spacing configurable) and 1yr daily price history → save both as CSV under `data/raw/` → compute `term_structure`, `skew`, `skew_ratio`, `curvature`, and (if price history is available) `vrp` → save each under `data/processed/`. Re-running on the same UTC day overwrites that day's files.
+**Pipeline (`src/job.py`)**: authenticate with Schwab → fetch a chain (weekly expiries through 60 DTE + the full monthly cadence beyond, ±N strikes around ATM per expiry, `data_dir`/expiry window/strike spacing configurable) and 1yr daily price history → save both as CSV under `data/raw/` → compute `term_structure`, `skew`, `skew_ratio`, `curvature`, and (if price history is available) `vrp` → save each under `data/processed/`. Re-running on the same UTC day overwrites that day's files.
 
-**Dashboard (`src/dashboard/`)**: a Streamlit multipage app that reads the latest saved snapshot (never talks to Schwab directly except via a sidebar "Refresh Live Data" button, which re-runs the job). `decision_engine.py` layers a 0–100 composite score onto contracts based on value (cheap/rich vs. the local IV smile), delta fit to a target, and liquidity — used by the Strike Selector and Decision Screener pages.
-
-## What `app.py` does
-
-[src/dashboard/app.py](src/dashboard/app.py) is the Streamlit entrypoint and also the shared module the other pages import from (since Streamlit multipage apps run each page as an independent script). It:
-
-1. **Renders the shared sidebar** (`render_sidebar()`) — save symbol, a "Refresh Live Data" button (re-runs `OptionsVolJob` and clears the cache), trade intent (buy/sell), target delta & tolerance, score weights, and contract filters (DTE range, option type, min volume/OI, max spread %) — packaged into an `AppConfig` dataclass. Widgets use explicit `key=` values so `st.session_state` keeps settings in sync as the user navigates between pages.
-2. **Loads and caches the latest snapshot** (`get_snapshot` / `_cached_snapshot`) — `st.cache_data` keyed on `(save_symbol, latest_chain_mtime)`, so a same-day manual refresh still busts the cache even though `CSVStore` overwrites same-day files. `load_snapshot_safely()` wraps this to show a friendly Streamlit warning/error instead of a traceback when no snapshot exists yet or loading fails.
-3. **Renders the Overview page** (`render_overview()`) when run directly — term structure, skew, and curvature charts, an optional VRP chart (skipped with an info message if no price history was saved), and an "Expiry Richness" table from `decision_engine.score_expiries()`.
-
-Because all UI logic lives inside functions guarded by `if __name__ == "__main__":`, importing `app.py` from a page script (to reuse `render_sidebar`, `get_snapshot`, `get_expiry_scores`, etc.) does not re-render the Overview page.
+**Data layer (`src/dashboard/`)**: read by the FastAPI backend (`src/api/`), never talks to Schwab directly except via `POST /api/refresh` (re-runs the job). `strategy_engine.recommend_trade()` turns a stated bullish/bearish view, timeline, risk appetite, and available capital into exactly one concrete vertical-spread recommendation — sized to that capital — with closed-form max profit/loss/breakeven/payoff, for the Strategy Builder.
 
 ## Setup
 
@@ -56,7 +41,7 @@ cp .env.example .env          # or: cp config.ini.example config.ini
 
 python -m src.job --first-time   # one-time OAuth browser flow, saves token.json
 python -m src.job                # fetch + persist a snapshot
-streamlit run src/dashboard/app.py
+./dev.sh                         # backend on :8000, frontend on :3000
 ```
 
 Other useful commands:
@@ -66,26 +51,11 @@ python -m src.job --backfill     # recompute metrics from every saved snapshot
 python -m src.charts             # generate static PNG charts into charts/
 ```
 
-## Deploying on Streamlit Community Cloud
-
-The app's disk is ephemeral there, and `schwab-py`'s first-time OAuth flow needs a local browser, so the pattern is: authenticate locally, ship the resulting token as a secret, and let the app re-materialize it on cold start.
-
-1. **Authenticate locally** (if you haven't already): `cp .env.example .env`, fill in your Schwab API key/secret, then `python -m src.job --first-time`. This saves `token.json`.
-2. **Base64-encode it**: `base64 -i token.json | tr -d '\n'` (macOS). Copy the output.
-3. **Deploy** on [share.streamlit.io](https://share.streamlit.io): connect this GitHub repo, set the main file path to `src/dashboard/app.py`.
-4. **Add secrets** in the app's Settings → Secrets:
-   ```toml
-   SCHWAB_API_KEY = "your_client_id"
-   SCHWAB_APP_SECRET = "your_client_secret"
-   SCHWAB_TOKEN_B64 = "paste the base64 string from step 2 here"
-   ```
-   `app.py` reads `SCHWAB_TOKEN_B64` on startup ([`_bootstrap_secrets`](src/dashboard/app.py)) and writes it to `token.json` if no token is present yet — see [`write_token_from_base64`](src/auth.py). It never overwrites a token already on disk, so schwab-py's automatic in-place refresh during a session is preserved.
-5. Once deployed, use the sidebar's **Refresh Live Data** button to pull a live snapshot — the dashboard has no data until that's clicked at least once per cold start, since `data/` isn't persisted either.
-6. **When the token eventually expires** (schwab-py refresh tokens are long-lived but not permanent), repeat steps 1–2 locally and update the `SCHWAB_TOKEN_B64` secret, then reboot the app from the Streamlit Cloud dashboard.
+`write_token_from_base64` ([src/auth.py](src/auth.py)) decodes `SCHWAB_TOKEN_B64` into `token.json` on startup if no token is present yet — used by the GitHub Actions daily job (see secrets below) so the workflow doesn't need a browser OAuth flow on every run. It never overwrites a token already on disk, so schwab-py's automatic in-place refresh during a session is preserved.
 
 ## Multi-symbol support and historical data
 
-`src/symbols.py`'s `SYMBOL_REGISTRY` lists every symbol the dashboard/pipeline knows about (SPX + the MAG7 equities) and each one's fetch parameters — an index needs a `$`-prefixed `api_symbol` and is validated at `strike_increment=100`/`strikes_each_side=5`; equities need `strike_increment=None` (skip the fixed-$-increment filter entirely) and a much wider `strikes_each_side=20` so skew/curvature can actually reach 25-delta at an equity's tighter native strike spacing. The dashboard sidebar's "Symbols" multiselect reads from this registry directly.
+`src/symbols.py`'s `SYMBOL_REGISTRY` lists every symbol the pipeline knows about (SPX + the MAG7 equities) and each one's fetch parameters — an index needs a `$`-prefixed `api_symbol` and is validated at `strike_increment=100`/`strikes_each_side=5`; equities need `strike_increment=None` (skip the fixed-$-increment filter entirely) and a much wider `strikes_each_side=20` so skew/curvature can actually reach 25-delta at an equity's tighter native strike spacing. The web app's Symbol Picker reads from this registry directly.
 
 **Why there's a second persistence layer.** `CSVStore` (`data/`, gitignored) only ever holds the *latest* snapshot — it overwrites same-day files, and the deployed app's disk is ephemeral, so nothing accumulates real day-over-day history there. IV Rank, a metric's z-score against its own trailing distribution, and a day-over-day digest all need that history, so there's a second store for it:
 
@@ -93,14 +63,15 @@ The app's disk is ephemeral there, and `schwab-py`'s first-time OAuth flow needs
 - **`src/daily_snapshot.py`** — headless multi-symbol runner (`python -m src.daily_snapshot`) that fetches every symbol in the registry and appends into `HistoryStore`. One symbol failing doesn't abort the others.
 - **`.github/workflows/daily-snapshot.yml`** — runs the above on a schedule (weekdays, ~21:30 UTC, after the US market close) and commits `history/vol_history.db` if it changed. This is a **git-committed SQLite file, not a hosted database** — a deliberate choice to avoid a new external service for a single-user tool; it does mean history only accumulates from whenever the workflow was enabled, there's no historical backfill.
 
-  Requires these **GitHub repo secrets** (Settings → Secrets and variables → Actions) — same values as the Streamlit Cloud secrets above, but it's a separate secret store, so they need to be added again here:
+  Requires these **GitHub repo secrets** (Settings → Secrets and variables → Actions):
   ```
   SCHWAB_API_KEY
   SCHWAB_APP_SECRET
   SCHWAB_CALLBACK_URL
   SCHWAB_TOKEN_B64
   ```
+  `SCHWAB_TOKEN_B64` is `base64 -i token.json | tr -d '\n'` run locally after a one-time `python -m src.job --first-time` — see `write_token_from_base64` above.
 
 ## Notes
 
-- `data/`, `.env`, `config.ini`, `token.json`, and `.streamlit/secrets.toml` are gitignored (per `.gitignore`) since they hold credentials/tokens or can grow large — `.env.example` and `config.ini.example` are the checked-in templates. `history/vol_history.db` is deliberately **not** gitignored — see above.
+- `data/`, `.env`, `config.ini`, and `token.json` are gitignored (per `.gitignore`) since they hold credentials/tokens or can grow large — `.env.example` and `config.ini.example` are the checked-in templates. `history/vol_history.db` is deliberately **not** gitignored — see above.

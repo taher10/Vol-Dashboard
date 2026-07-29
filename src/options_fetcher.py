@@ -14,11 +14,50 @@ from __future__ import annotations
 
 import calendar
 import math
+import threading
+import time
 from datetime import datetime, date, timedelta, UTC
 from typing import Optional, Union
 
 import pandas as pd
 import schwab
+
+
+class _RateLimiter:
+    """
+    Sliding-window limiter shared across every OptionsFetcher instance in the
+    process: blocks just long enough before each call to keep the trailing
+    window under `max_calls`. Needed because daily_snapshot.py creates a new
+    OptionsFetcher per symbol in a plain sequential loop with no pacing of
+    its own, and Schwab's ~120 req/min data-endpoint limit is per app/account,
+    not per symbol -- a per-instance limiter wouldn't see calls made for a
+    different symbol. 100/min (vs. the ~120/min commonly cited) leaves
+    headroom for the limit's own tolerance/measurement window.
+    """
+
+    def __init__(self, max_calls: int, window_seconds: float) -> None:
+        self._max_calls = max_calls
+        self._window = window_seconds
+        self._timestamps: list[float] = []
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            self._timestamps = [t for t in self._timestamps if now - t < self._window]
+            if len(self._timestamps) >= self._max_calls:
+                sleep_for = self._window - (now - self._timestamps[0])
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                now = time.monotonic()
+                self._timestamps = [t for t in self._timestamps if now - t < self._window]
+            self._timestamps.append(now)
+
+
+# Shared across every OptionsFetcher instance and every symbol in a run --
+# see _RateLimiter's docstring for why this must be process-global, not
+# per-instance.
+_SCHWAB_RATE_LIMITER = _RateLimiter(max_calls=100, window_seconds=60.0)
 
 _KEEP_COLUMNS = [
     "symbol", "optionType", "expiration", "dte", "strikePrice",
@@ -111,6 +150,59 @@ def monthly_expiry_dates(
     return expiries
 
 
+def weekly_expiry_dates(
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+) -> list[date]:
+    """
+    Return every weekly expiry date (Friday, holiday-adjusted to the
+    preceding Thursday per _US_HOLIDAYS -- same fallback rule as
+    _monthly_expiry) between from_date and to_date inclusive.
+    """
+    start = from_date or date.today()
+    end = to_date or (start + timedelta(days=730))
+
+    # Advance to the first Friday on/after start.
+    first_weekday = start.weekday()
+    days_to_friday = (4 - first_weekday) % 7
+    d = start + timedelta(days=days_to_friday)
+    if d in _US_HOLIDAYS:
+        d -= timedelta(days=1)
+
+    expiries: list[date] = []
+    while d <= end:
+        if d >= start:
+            expiries.append(d)
+        d += timedelta(days=7)
+        if d in _US_HOLIDAYS:
+            d -= timedelta(days=1)
+
+    return expiries
+
+
+def expiry_dates_for_pull(
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+    weekly_through_days: int = 60,
+) -> list[date]:
+    """
+    Union of weekly expiries (through weekly_through_days out) and the full
+    monthly cadence (through to_date) -- weekly for the near-dated, tradeable
+    window a vol trader actually looks at, monthly beyond that where per-
+    expiry API calls stop being worth the added coverage. Deduped and sorted;
+    monthlies that fall inside the weekly window collapse into the weekly
+    set naturally since a 3rd Friday is also a Friday.
+    """
+    start = from_date or date.today()
+    end = to_date or (start + timedelta(days=730))
+    weekly_end = min(end, start + timedelta(days=weekly_through_days))
+
+    weeklies = weekly_expiry_dates(start, weekly_end)
+    monthlies = monthly_expiry_dates(start, end)
+
+    return sorted(set(weeklies) | set(monthlies))
+
+
 class OptionsFetcher:
     """Fetches and parses SPX (or any symbol) options chains from Schwab."""
 
@@ -134,9 +226,13 @@ class OptionsFetcher:
         scale_strikes_with_dte: bool = True,
         dte_scaling_reference: float = 30.0,
         max_strikes_each_side: int = 40,
+        weekly_through_days: int = 0,
     ) -> pd.DataFrame:
         """
-        Fetch monthly expiries only (3rd Friday, holiday-adjusted).
+        Fetch monthly expiries (3rd Friday, holiday-adjusted), plus weekly
+        expiries through `weekly_through_days` out when weekly_through_days > 0
+        (default 0 preserves the original monthly-only behavior for any other
+        caller).
 
         For each expiry, requests a wide strike window then post-filters to
         only keep strikes at `strike_increment` intervals (default $100) within
@@ -187,13 +283,22 @@ class OptionsFetcher:
                                    used unchanged; the scaling anchor point
         max_strikes_each_side   : safety cap on how wide the per-expiry strike
                                    count is allowed to grow
+        weekly_through_days     : if > 0, also fetch weekly (every-Friday)
+                                   expiries out through this many days, in
+                                   addition to the full monthly cadence (see
+                                   expiry_dates_for_pull). 0 (default) fetches
+                                   monthly expiries only.
         """
         ct = self._CONTRACT_TYPE_MAP.get(
             contract_type.upper(),
             schwab.client.Client.Options.ContractType.ALL,
         )
 
-        expiries = monthly_expiry_dates(from_date, to_date)
+        expiries = (
+            expiry_dates_for_pull(from_date, to_date, weekly_through_days)
+            if weekly_through_days > 0
+            else monthly_expiry_dates(from_date, to_date)
+        )
         reference_date = from_date or date.today()
 
         chunks: list[pd.DataFrame] = []
@@ -307,6 +412,7 @@ class OptionsFetcher:
         strike_count: int,
     ) -> pd.DataFrame:
         """Fetch one expiry date. strike_count is centred around ATM."""
+        _SCHWAB_RATE_LIMITER.wait()
         response = self._client.get_option_chain(
             symbol=self.symbol,
             contract_type=ct,
@@ -370,6 +476,7 @@ class OptionsFetcher:
         to_date: date,
     ) -> pd.DataFrame:
         """Fetch one date-range window. Returns empty DataFrame on non-200."""
+        _SCHWAB_RATE_LIMITER.wait()
         response = self._client.get_option_chain(
             symbol=self.symbol,
             contract_type=ct,
@@ -397,6 +504,7 @@ class OptionsFetcher:
             3: schwab.client.Client.PriceHistory.Period.THREE_YEARS,
         }
         period = period_map.get(lookback_years, schwab.client.Client.PriceHistory.Period.ONE_YEAR)
+        _SCHWAB_RATE_LIMITER.wait()
         response = self._client.get_price_history(
             symbol=self.symbol,
             period_type=schwab.client.Client.PriceHistory.PeriodType.YEAR,

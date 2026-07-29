@@ -1,9 +1,9 @@
 # Vol Dashboard — Web App (prototype)
 
-A second, browser-based UI for the same options-volatility data as the root
-project's Streamlit app. Same underlying pipeline and saved snapshots — see
-the [root README](../README.md) for how the data gets there (Schwab fetch,
-metrics, CSV/SQLite persistence). This app only reads it.
+The browser-based UI for the options-volatility data produced by the root
+project's pipeline. See the [root README](../README.md) for how the data
+gets there (Schwab fetch, metrics, CSV/SQLite persistence). This app reads
+that data and (via `POST /api/refresh`) can also trigger a fresh pull.
 
 This is a **design-first prototype**, not a production deployment. See
 [Scope and limitations](#scope-and-limitations) before treating it as more
@@ -19,13 +19,11 @@ frontend/        Next.js 16 + TypeScript + Tailwind + shadcn/ui + Recharts —
 ```
 
 `src/api/routes.py` is deliberately thin: it does query-param parsing and
-DataFrame -> JSON serialization only. All scoring/metrics logic
-(`score_expiries`, `score_contracts`, IV rank, trailing z-score, etc.) still
-lives in `src/dashboard/data_loader.py`, `src/dashboard/decision_engine.py`,
-and `src/history_store.py` — nothing is duplicated between the Streamlit app
-and this one. The API also intentionally never imports `src/dashboard/app.py`
-(which would pull in Streamlit) and exposes no "refresh live data" endpoint —
-refreshing stays an owner-run/GitHub Actions job, same as today.
+DataFrame -> JSON serialization only. All scoring/metrics/strategy logic
+(`score_expiries`, `strategy_engine.recommend_trade`, IV rank, trailing
+z-score, etc.) lives in `src/dashboard/data_loader.py`,
+`src/dashboard/decision_engine.py`, `src/dashboard/strategy_engine.py`, and
+`src/history_store.py` — nothing is duplicated here.
 
 Endpoints (`src/api/main.py` + `src/api/routes.py`):
 
@@ -35,29 +33,30 @@ Endpoints (`src/api/main.py` + `src/api/routes.py`):
 | `GET /api/symbols` | List of symbols in `src/symbols.py`'s registry, with display colors |
 | `GET /api/overview` | Term structure / skew / curvature / VRP series + expiry richness scores + takeaway, for one or more comma-separated symbols |
 | `GET /api/expiry/{symbol}` | Vol smile + score for one expiry (defaults to the nearest), plus neighboring-expiry context |
-| `GET /api/contracts/{symbol}` | Scored, filterable contracts — scoped to one expiry when `expiration` is given (Strike Selector), or across the whole chain when omitted (Decision Screener) |
+| `GET /api/strategy/{symbol}/recommend` | The one best vertical spread for a stated direction/timeline/risk-appetite view, sized to given capital — payoff/max-profit/max-loss/breakeven/position-sizing (Strategy Builder) |
 | `GET /api/history/{symbol}/iv-rank` | IV rank/percentile vs. trailing history (from `history/vol_history.db`) |
 | `GET /api/history/{symbol}/zscore` | Trailing z-score for a chosen metric |
+| `POST /api/refresh` | Triggers a live Schwab pull via `OptionsVolJob.run()` for the given symbols — see [Scope and limitations](#scope-and-limitations), this is a mutating, credential-backed action |
 
 CORS is restricted to `FRONTEND_ORIGIN` (backend env var, default
-`http://localhost:3000`) rather than left open, since this is an
-unauthenticated read endpoint.
+`http://localhost:3000`) rather than left open, since most endpoints are
+unauthenticated reads.
 
-### Pages (mirror the Streamlit app's 4 views)
+### Pages
 
-| Route | Streamlit equivalent | What it shows |
-|---|---|---|
-| `/` (Overview) | `app.py` | Multi-symbol term structure / skew / curvature / VRP charts + expiry richness table |
-| `/expiry/[symbol]` (Expiry Drilldown) | `pages/1_Expiry_Drilldown.py` | Vol smile and richness/skew/curvature for one expiry |
-| `/strikes/[symbol]` (Strike Selector) | `pages/2_Strike_Selector.py` | Ranked, scored contracts for one expiry/side, highlighted on the smile |
-| `/screener/[symbol]` (Decision Screener) | `pages/3_Decision_Screener.py` | Top-ranked contracts across the whole filtered chain |
+| Route | What it shows |
+|---|---|
+| `/` (Overview) | Multi-symbol term structure / skew / curvature / VRP charts + expiry richness table |
+| `/expiry/[symbol]` (Expiry Drilldown) | Vol smile and richness/skew/curvature for one expiry |
+| `/strategy/[symbol]` (Strategy Builder) | One recommended vertical spread for a stated direction/timeline/risk appetite, sized to your capital, with a payoff chart |
+| `/history/[symbol]` (History) | Day-over-day metric trend + accumulated snapshot history |
 
 `frontend/src/lib/store.ts` is a Zustand store (persisted to
-`localStorage`) holding the shared settings — symbols, trade intent, target
-delta/tolerance, score weights, and contract filters. It's the web
-equivalent of the Streamlit sidebar's `AppConfig`/`st.session_state`, except
-it's a real durable client-side store shared across all 4 pages instead of
-per-session Streamlit state.
+`localStorage`) holding the shared settings — symbols and the DTE viewing
+window — a real durable client-side store shared across every page.
+Strategy Builder's inputs (direction, timeline, risk appetite, capital) are
+page-local instead, since they're per-recommendation, not shared dashboard
+state.
 
 ## Local setup
 
@@ -107,10 +106,11 @@ Other `frontend/package.json` scripts: `npm run build` (production build),
 .venv/bin/uvicorn src.api.main:app --reload --port 8000
 ```
 
-Like the Streamlit app, the API reads whatever's already saved under
-`data/processed/` and `history/vol_history.db` — run the root project's
-`python -m src.job` (or `src.daily_snapshot`) first if there's no snapshot
-yet; a 404 with a "no saved snapshot" detail means there's nothing to read.
+The API reads whatever's already saved under `data/processed/` and
+`history/vol_history.db` — run the root project's `python -m src.job` (or
+`src.daily_snapshot`) first if there's no snapshot yet, or use the sidebar's
+"Refresh Live Data" button (`POST /api/refresh`); a 404 with a "no saved
+snapshot" detail means there's nothing to read yet.
 
 ## Environment variables
 
@@ -134,15 +134,12 @@ frontend dev server runs on a different port.
 This prototype is intentionally missing several things a real public
 deployment would need:
 
-- **No auth.** Every endpoint is open and unauthenticated. Fine for local/owner
-  use; not fine for anything reachable by the public as-is.
-- **No live "refresh data" action from the web app.** Both UIs are read-only
-  over the same saved snapshot files (`data/processed/`, `history/vol_history.db`).
-  Refreshing from Schwab stays an owner-run command (`python -m src.job`) or the
-  scheduled GitHub Actions job (`.github/workflows/daily-snapshot.yml`) — there
-  is no button anywhere in this web app that triggers a live fetch.
-- **No real database.** The API reads the same CSV/SQLite files as the
-  Streamlit app; no new persistence layer was introduced.
+- **No auth.** Every endpoint is open and unauthenticated, including
+  `POST /api/refresh`, which triggers a real credential-backed Schwab pull.
+  Fine for local/owner use; not fine for anything reachable by the public
+  as-is — this would need to come back out or move behind auth first.
+- **No real database.** The API reads the same CSV/SQLite files the pipeline
+  already wrote; no new persistence layer was introduced.
 - **No hosting/deployment.** This only runs locally today; there's no
   Vercel/cloud config for the frontend or a hosting story for the API.
 - **Unresolved: Schwab data-redistribution compliance.** The intended
