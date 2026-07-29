@@ -3,13 +3,10 @@ src/api/routes.py
 
 REST endpoints for the web dashboard. Every endpoint is a thin wrapper
 around the existing pipeline/scoring modules (src/dashboard/data_loader.py,
-src/dashboard/decision_engine.py, src/history_store.py, src/symbols.py) —
-no scoring or metrics logic is duplicated here, only HTTP plumbing
-(query-param parsing/validation and DataFrame -> JSON serialization).
-
-Deliberately does NOT import src.dashboard.app: that module pulls in
-Streamlit and bootstraps Streamlit secrets at import time, neither of which
-this API needs.
+src/dashboard/decision_engine.py, src/dashboard/strategy_engine.py,
+src/history_store.py, src/symbols.py) — no scoring, metrics, or strategy
+logic is duplicated here, only HTTP plumbing (query-param parsing/validation
+and DataFrame -> JSON serialization).
 
 This app is currently run for personal/local use only (see README's "Web
 app" section), so /api/refresh triggers a live Schwab pull directly — that
@@ -25,15 +22,14 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from src.data_quality import LiveDataUnavailableError
-from src.dashboard import data_loader, decision_engine
+from src.dashboard import data_loader, decision_engine, strategy_engine
 from src.dashboard.data_loader import SnapshotBundle
-from src.dashboard.decision_engine import ContractFilters, ScoreWeights
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
 from src.symbols import SYMBOL_REGISTRY
 
 from .schemas import SymbolOut
-from .serialize import df_records, series_record
+from .serialize import clean_value, df_records, series_record
 
 router = APIRouter(prefix="/api")
 
@@ -60,8 +56,7 @@ def _load_bundle(symbol: str) -> SnapshotBundle:
 def _filter_metrics_by_dte(
     metrics: dict[str, pd.DataFrame], dte_min: int, dte_max: int
 ) -> dict[str, pd.DataFrame]:
-    """Mirrors src/dashboard/app.py's _filter_metrics_by_dte (kept local so
-    this module never has to import the Streamlit-coupled app.py)."""
+    """Filters each metrics DataFrame down to a DTE window before scoring/display."""
     filtered: dict[str, pd.DataFrame] = {}
     for name, df in metrics.items():
         if df is not None and not df.empty and "dte" in df.columns:
@@ -241,27 +236,60 @@ def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Contracts (Strike Selector when `expiration` is given, Decision Screener when omitted)
+# Strategy Builder — one recommended vertical spread for a stated view
 # ---------------------------------------------------------------------------
 
 
-@router.get("/contracts/{symbol}")
-def contracts(
+def _leg_record(leg: strategy_engine.Leg) -> dict:
+    return {
+        "action": leg.action,
+        "optionType": leg.optionType,
+        "strike": clean_value(leg.strike),
+        "delta": clean_value(leg.delta),
+        "mid": clean_value(leg.mid),
+    }
+
+
+def _candidate_record(c: strategy_engine.Candidate) -> dict:
+    # Every numeric field routed through clean_value() -- same convention as
+    # df_records() elsewhere in this module -- so a NaN/Infinity anywhere in
+    # here (e.g. a future field addition, or a candidate built from unusual
+    # chain data) becomes a clean JSON null instead of an unhandled 500 from
+    # Starlette's allow_nan=False JSON encoder.
+    return {
+        "structure": c.structure,
+        "direction": c.direction,
+        "expiration": pd.Timestamp(c.expiration).date().isoformat(),
+        "dte": c.dte,
+        "legs": [_leg_record(leg) for leg in c.legs],
+        "net_debit_credit": clean_value(c.net_debit_credit),
+        "max_profit": clean_value(c.max_profit),
+        "max_loss": clean_value(c.max_loss),
+        "breakevens": [clean_value(b) for b in c.breakevens],
+        "approx_pop": clean_value(c.approx_pop),
+        "payoff": [{"underlying": clean_value(p["underlying"]), "pnl": clean_value(p["pnl"])} for p in c.payoff],
+    }
+
+
+def _sizing_record(s: strategy_engine.PositionSizing) -> dict:
+    return {
+        "capital_available": clean_value(s.capital_available),
+        "max_loss_per_contract": clean_value(s.max_loss_per_contract),
+        "contracts": s.contracts,
+        "capital_used": clean_value(s.capital_used),
+        "capital_used_pct": clean_value(s.capital_used_pct),
+        "total_max_profit": clean_value(s.total_max_profit),
+        "total_max_loss": clean_value(s.total_max_loss),
+    }
+
+
+@router.get("/strategy/{symbol}/recommend")
+def recommend_strategy(
     symbol: str,
-    expiration: str | None = Query(None, description="Scope to one expiry (Strike Selector); omit for whole-chain screening"),
-    option_type: Literal["BOTH", "CALL", "PUT"] = Query("BOTH"),
-    intent: Literal["buy", "sell"] = Query("buy"),
-    target_delta: float = Query(0.25, ge=0.0, le=1.0),
-    delta_tolerance: float = Query(0.15, gt=0.0, le=1.0),
-    w_value: float = Query(0.4, ge=0.0, le=1.0),
-    w_delta_fit: float = Query(0.3, ge=0.0, le=1.0),
-    w_liquidity: float = Query(0.3, ge=0.0, le=1.0),
-    dte_min: int = Query(0, ge=0),
-    dte_max: int = Query(730, ge=0),
-    min_volume: int = Query(0, ge=0),
-    min_open_interest: int = Query(0, ge=0),
-    max_spread_pct: float = Query(25.0, ge=0.0),
-    limit: int | None = Query(None, ge=1, le=500),
+    direction: Literal["bullish", "bearish"] = Query(...),
+    timeline: Literal["short", "medium", "long"] = Query(...),
+    risk: Literal["conservative", "moderate", "aggressive"] = Query(...),
+    capital: float | None = Query(None, gt=0.0, description="Capital available, used to size the position"),
 ) -> dict:
     symbol = symbol.upper()
     bundle = _load_bundle(symbol)
@@ -269,48 +297,16 @@ def contracts(
     if chain is None or chain.empty:
         raise HTTPException(status_code=404, detail=f"No option chain data for '{symbol}'.")
 
-    if option_type == "CALL":
-        option_types: tuple[str, ...] = ("CALL",)
-    elif option_type == "PUT":
-        option_types = ("PUT",)
-    else:
-        option_types = ("CALL", "PUT")
-
-    resolved_dte_range = (dte_min, dte_max)
-    if expiration is not None:
-        matched = _match_expiration(chain, expiration)
-        if matched.empty:
-            raise HTTPException(status_code=404, detail=f"No contracts for expiration '{expiration}' on '{symbol}'.")
-        dte_value = int(matched["dte"].iloc[0])
-        resolved_dte_range = (dte_value, dte_value)
-
-    filters = ContractFilters(
-        dte_range=resolved_dte_range,
-        option_types=option_types,
-        min_volume=min_volume,
-        min_open_interest=min_open_interest,
-        max_spread_pct=max_spread_pct,
-    )
-    weights = ScoreWeights(value=w_value, delta_fit=w_delta_fit, liquidity=w_liquidity)
-
-    scored = decision_engine.score_contracts(
-        chain,
-        intent=intent,
-        target_delta=target_delta,
-        delta_tolerance=delta_tolerance,
-        weights=weights,
-        filters=filters,
-    )
-
-    total = len(scored)
-    if limit is not None:
-        scored = decision_engine.top_candidates(scored, n=limit)
+    rec = strategy_engine.recommend_trade(chain, direction=direction, timeline=timeline, risk=risk, capital=capital)
 
     return {
         "symbol": symbol,
-        "expiration": expiration,
-        "total_matched": total,
-        "contracts": df_records(scored),
+        "direction": direction,
+        "timeline": timeline,
+        "risk": risk,
+        "spot": _underlying_price(chain),
+        "recommendation": _candidate_record(rec.candidate) if rec else None,
+        "sizing": _sizing_record(rec.sizing) if rec and rec.sizing else None,
     }
 
 

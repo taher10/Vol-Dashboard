@@ -34,15 +34,3 @@ export function richnessKey(label: string | null | undefined): "cheap" | "rich" 
   if (lower === "rich") return "rich";
   return "neutral";
 }
-
-/** Same slot order/hues as src/symbols.py's SYMBOL_REGISTRY. */
-export const SYMBOL_COLORS: Record<string, string> = {
-  SPX: "#2a78d6",
-  AAPL: "#eb6834",
-  MSFT: "#1baf7a",
-  GOOGL: "#eda100",
-  AMZN: "#e87ba4",
-  NVDA: "#008300",
-  META: "#4a3aa7",
-  TSLA: "#e34948",
-};

@@ -143,34 +143,6 @@ export interface ExpiryResponse {
   neighbors: (ExpiryScoreRow & { position: string })[];
 }
 
-export interface ContractRow {
-  optionType: "CALL" | "PUT";
-  expiration: string;
-  dte: number;
-  strikePrice: number;
-  bid: number;
-  ask: number;
-  mid: number;
-  spread_pct: number;
-  volume: number;
-  openInterest: number;
-  delta: number;
-  impliedVolatility: number;
-  liquidity_score: number | null;
-  delta_fit_score: number | null;
-  value_score: number | null;
-  composite_score: number | null;
-  rank: number;
-  [key: string]: unknown;
-}
-
-export interface ContractsResponse {
-  symbol: string;
-  expiration: string | null;
-  total_matched: number;
-  contracts: ContractRow[];
-}
-
 export interface IVRank {
   current_iv: number;
   iv_rank: number;
@@ -186,6 +158,60 @@ export interface ZScore {
   trailing_std: number;
   zscore: number;
   n_observations: number;
+}
+
+export interface StrategyLeg {
+  action: "buy" | "sell";
+  optionType: "CALL" | "PUT";
+  strike: number;
+  delta: number | null;
+  mid: number;
+}
+
+export interface PayoffPoint {
+  underlying: number;
+  pnl: number;
+}
+
+export interface StrategyCandidate {
+  structure: string;
+  direction: "bullish" | "bearish";
+  expiration: string;
+  dte: number;
+  legs: StrategyLeg[];
+  net_debit_credit: number;
+  max_profit: number;
+  max_loss: number;
+  breakevens: number[];
+  approx_pop: number;
+  payoff: PayoffPoint[];
+}
+
+export interface PositionSizing {
+  capital_available: number;
+  max_loss_per_contract: number;
+  contracts: number;
+  capital_used: number;
+  capital_used_pct: number;
+  total_max_profit: number;
+  total_max_loss: number;
+}
+
+export interface RecommendResponse {
+  symbol: string;
+  direction: "bullish" | "bearish";
+  timeline: "short" | "medium" | "long";
+  risk: "conservative" | "moderate" | "aggressive";
+  spot: number | null;
+  recommendation: StrategyCandidate | null;
+  sizing: PositionSizing | null;
+}
+
+export interface RecommendQueryParams {
+  direction: "bullish" | "bearish";
+  timeline: "short" | "medium" | "long";
+  risk: "conservative" | "moderate" | "aggressive";
+  capital?: number;
 }
 
 export interface RefreshResponse {
@@ -212,23 +238,6 @@ export interface PriceBar {
   volume: number | null;
 }
 
-export interface ContractQueryParams {
-  expiration?: string;
-  option_type?: "BOTH" | "CALL" | "PUT";
-  intent?: "buy" | "sell";
-  target_delta?: number;
-  delta_tolerance?: number;
-  w_value?: number;
-  w_delta_fit?: number;
-  w_liquidity?: number;
-  dte_min?: number;
-  dte_max?: number;
-  min_volume?: number;
-  min_open_interest?: number;
-  max_spread_pct?: number;
-  limit?: number;
-}
-
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
@@ -246,8 +255,8 @@ export const api = {
   expiry: (symbol: string, expiration?: string) =>
     apiGet<ExpiryResponse>(`/api/expiry/${symbol}`, { expiration }),
 
-  contracts: (symbol: string, params: ContractQueryParams) =>
-    apiGet<ContractsResponse>(`/api/contracts/${symbol}`, { ...params }),
+  recommendStrategy: (symbol: string, params: RecommendQueryParams) =>
+    apiGet<RecommendResponse>(`/api/strategy/${symbol}/recommend`, { ...params }),
 
   ivRank: (symbol: string) => apiGet<IVRank | null>(`/api/history/${symbol}/iv-rank`),
 

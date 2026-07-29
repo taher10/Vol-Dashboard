@@ -1,10 +1,9 @@
 """
 src/dashboard/data_loader.py
 
-Plain-Python data-access layer for the Streamlit dashboard. Wraps CSVStore /
-OptionsVolJob only — no Streamlit imports here (caching decorators belong at
-the Streamlit call sites, since this module must stay testable without a
-Streamlit runtime).
+Plain-Python data-access layer used by the FastAPI backend (src/api/).
+Wraps CSVStore / OptionsVolJob only — no web-framework imports here, so it
+stays testable without either framework's runtime.
 """
 
 from __future__ import annotations
@@ -167,8 +166,9 @@ def trigger_live_refresh(
     OptionsVolJob, overwriting today's saved CSVs, then re-read via
     load_latest_snapshot() for a consistent bundle (run() only returns
     metrics, not chain/prices). Auth/network errors (e.g. missing
-    token.json) are intentionally left to propagate unmodified — the
-    Streamlit UI layer is responsible for catching and displaying them.
+    token.json) are intentionally left to propagate unmodified — the caller
+    (src/api/routes.py's /api/refresh) is responsible for catching and
+    reporting them.
 
     strike_increment/strikes_each_side are passed straight through to
     OptionsVolJob -- pass strike_increment=None and a much larger
