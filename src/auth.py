@@ -17,7 +17,9 @@ Usage
 from __future__ import annotations
 
 import base64
+import binascii
 import configparser
+import json
 import os
 from pathlib import Path
 
@@ -29,26 +31,65 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.ini"
 
 
+class InvalidTokenSecretError(ValueError):
+    """Raised by write_token_from_base64 when SCHWAB_TOKEN_B64 is missing/empty
+    or doesn't decode to a valid token.json -- see that function's docstring
+    for why this needs to fail loudly rather than write a broken file."""
+
+
 def write_token_from_base64(b64_token: str, token_path: str | Path | None = None) -> Path:
     """
     Decode a base64-encoded token.json (produced locally via `base64 -i
     token.json` after a one-time `--first-time` OAuth run) and write it to
     disk, but only if no token file exists there yet.
 
-    For hosts with ephemeral storage (e.g. Streamlit Community Cloud),
-    token.json from a local first-time auth doesn't survive a redeploy/cold
-    start. Stashing its base64 contents as a secret and calling this on app
-    startup re-materializes it without needing a browser-based OAuth flow on
-    the server itself. Never overwrites an existing token -- schwab-py
-    refreshes it in place, so a live token on disk is newer than the secret.
+    For hosts with ephemeral storage (e.g. Streamlit Community Cloud, a fresh
+    GitHub Actions checkout), token.json from a local first-time auth doesn't
+    survive a redeploy/cold start. Stashing its base64 contents as a secret
+    and calling this on startup re-materializes it without needing a
+    browser-based OAuth flow on the server itself. Never overwrites an
+    existing token -- schwab-py refreshes it in place, so a live token on
+    disk is newer than the secret.
+
+    Validates eagerly (empty input, malformed base64, non-JSON content)
+    instead of writing whatever it's given: an empty or misconfigured
+    SCHWAB_TOKEN_B64 secret used to silently produce a 0-byte token.json,
+    which only surfaced several steps later as a confusing
+    `json.JSONDecodeError` deep in schwab-py's own token-loading code,
+    with nothing pointing back at the actual cause.
     """
+    if not b64_token or not b64_token.strip():
+        raise InvalidTokenSecretError(
+            "SCHWAB_TOKEN_B64 is empty. Generate it locally with "
+            "`base64 -i token.json | tr -d '\\n'` (after a one-time "
+            "`python -m src.job --first-time` run) and set it as a secret."
+        )
+
+    try:
+        decoded = base64.b64decode(b64_token, validate=True)
+    except binascii.Error as exc:
+        raise InvalidTokenSecretError(
+            f"SCHWAB_TOKEN_B64 is not valid base64 ({exc}). Re-generate it with "
+            "`base64 -i token.json | tr -d '\\n'` and make sure the whole value "
+            "was copied with no extra whitespace/newlines."
+        ) from exc
+
+    try:
+        json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise InvalidTokenSecretError(
+            f"SCHWAB_TOKEN_B64 decoded to {len(decoded)} bytes that aren't valid JSON ({exc}). "
+            "It should decode to your token.json's exact contents -- re-generate it with "
+            "`base64 -i token.json | tr -d '\\n'`."
+        ) from exc
+
     path = Path(token_path) if token_path else Path(os.environ.get("TOKEN_PATH", "token.json"))
     if not path.is_absolute():
         path = _PROJECT_ROOT / path
     if path.exists():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(base64.b64decode(b64_token))
+    path.write_bytes(decoded)
     return path
 
 
