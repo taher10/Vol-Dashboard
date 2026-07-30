@@ -16,7 +16,14 @@ garbage (all-NaN term structure, no skew/curvature).
 
 from __future__ import annotations
 
+from datetime import datetime, time as _time, UTC
+from zoneinfo import ZoneInfo
+
 import pandas as pd
+
+_MARKET_TZ = ZoneInfo("America/New_York")
+_MARKET_OPEN = _time(9, 30)
+_MARKET_CLOSE = _time(16, 0)
 
 
 class LiveDataUnavailableError(Exception):
@@ -39,3 +46,22 @@ def is_chain_usable(chain: pd.DataFrame | None, min_valid_fraction: float = 0.5)
     iv = chain["impliedVolatility"]
     valid = iv.notna() & (iv > 0) & (iv < 500)  # -999 sentinel is excluded by > 0 alone; 500% is a generous sanity cap
     return bool(valid.mean() >= min_valid_fraction)
+
+
+def is_regular_market_hours(now: datetime | None = None) -> bool:
+    """
+    Rough regular-hours check (9:30am-4:00pm US/Eastern, Mon-Fri). Doesn't
+    know about market holidays -- there's no maintained holiday calendar to
+    check against here -- so it reads a real holiday that falls on a weekday
+    as "should be open." That's fine for its one purpose: telling apart "a
+    quote gap during a normal trading session" (worth flagging as a likely
+    real problem) from "a quote gap outside trading hours" (the expected,
+    benign case) when a chain comes back unusable -- see is_chain_usable's
+    caller in job.py. A holiday still correctly produces a genuine gap this
+    can't explain the cause of, which is a smaller, safer failure mode than
+    silently reassuring "likely outside market hours" during a real outage.
+    """
+    now = (now or datetime.now(UTC)).astimezone(_MARKET_TZ)
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE

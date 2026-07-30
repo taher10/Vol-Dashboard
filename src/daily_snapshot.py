@@ -13,8 +13,19 @@ src/history_store.py's docstring for why).
 
 One symbol failing (auth hiccup, Schwab rate limit, a bad expiry) does not
 abort the run -- every other symbol still gets fetched, and the script exits
-non-zero only if every symbol failed, so a CI schedule doesn't need special
-handling for "one name had a bad day."
+non-zero only if every symbol hit a genuine error, so a CI schedule doesn't
+need special handling for "one name had a bad day."
+
+Deliberately does NOT exit non-zero when every symbol is merely "skipped"
+(LiveDataUnavailableError, e.g. every name legitimately has no quotes on a
+market holiday that still falls on a cron weekday) -- that's a correct,
+expected outcome some days, not a bug, and treating it as a CI failure would
+train whoever's watching to ignore real failure alerts. Instead this always
+writes a clear ok/skipped/failed breakdown to $GITHUB_STEP_SUMMARY (visible
+directly on the run's summary page, no log access needed) so a *pattern* of
+all-skipped days -- as opposed to one holiday -- is easy to notice. Catching
+that pattern automatically (not just leaving it visible) is what the
+separate heartbeat workflow is for (.github/workflows/pipeline-heartbeat.yml).
 
 Usage
 -----
@@ -26,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,6 +96,43 @@ def run(symbols: list[str]) -> dict[str, str]:
     return results
 
 
+def _write_step_summary(results: dict[str, str]) -> None:
+    """
+    Write an ok/skipped/failed breakdown to $GITHUB_STEP_SUMMARY (a GitHub
+    Actions feature: markdown written here renders directly on the run's
+    summary page, visible to anyone who can see the Actions tab -- unlike raw
+    step logs, which need repo-admin auth to fetch via the API). No-op
+    outside GitHub Actions (env var unset), so this is harmless to call
+    locally/in tests.
+    """
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+
+    ok = sorted(s for s, status in results.items() if status == "ok")
+    skipped = sorted(s for s, status in results.items() if status.startswith("skipped"))
+    failed = sorted(s for s in results if s not in ok and s not in skipped)
+
+    lines = [
+        "## Daily snapshot summary",
+        f"- ✅ **{len(ok)} ok**: {', '.join(ok) if ok else '(none)'}",
+        f"- ⏭️ **{len(skipped)} skipped** (no live quotes -- expected on a market holiday): {', '.join(skipped) if skipped else '(none)'}",
+        f"- ❌ **{len(failed)} failed**: {', '.join(failed) if failed else '(none)'}",
+    ]
+    if not ok and not failed:
+        lines.append(
+            "\n⚠️ **Every symbol was skipped today.** Normal on a market holiday; "
+            "worth a manual look if this repeats on a normal trading day."
+        )
+    if failed:
+        lines.append("\n**Failure detail:**")
+        for s in failed:
+            lines.append(f"- `{s}`: {results[s]}")
+
+    with open(path, "a") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Fetch every registered symbol and append to the history DB.")
     p.add_argument(
@@ -100,6 +149,8 @@ if __name__ == "__main__":
     print("\n--- Daily snapshot summary ---")
     for symbol, status in results.items():
         print(f"  {symbol:6s}: {status}")
+
+    _write_step_summary(results)
 
     # "skipped (live data unavailable)" is expected/benign (see LiveDataUnavailableError
     # handling above), not a failure -- only exit non-zero if every symbol hit a real error.

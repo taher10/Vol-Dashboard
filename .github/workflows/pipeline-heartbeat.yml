@@ -1,0 +1,59 @@
+name: Pipeline heartbeat
+
+# Independent check that the "Daily vol snapshot" workflow actually fired
+# today. GitHub's own docs note scheduled (cron) workflows can occasionally
+# be delayed or dropped under platform load -- when that happens there's no
+# run at all, so nothing shows red and no failure email goes out; the main
+# job has nothing to alert on because it never started. This workflow runs
+# on its own schedule (~45min after the main job's) and fails loudly
+# (triggering GitHub's default failure-notification email) if no run of
+# that workflow exists with a start time in roughly the last day --
+# independent of whatever that run's own conclusion was (a legitimate
+# all-symbols-skipped day, e.g. a market holiday, still counts as "it ran").
+#
+# Deliberately does NOT try to judge whether real data was collected --
+# daily_snapshot.py's own $GITHUB_STEP_SUMMARY breakdown (see
+# src/daily_snapshot.py) already makes an all-skipped day visible on that
+# run's own summary page; this workflow only answers "did it run at all."
+
+on:
+  schedule:
+    - cron: "15 22 * * 1-5" # 45 min after daily-snapshot.yml's 21:30 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the daily snapshot workflow ran recently
+        run: |
+          curl -s "https://api.github.com/repos/${{ github.repository }}/actions/workflows/daily-snapshot.yml/runs?per_page=1" | python3 -c "
+          import json, sys
+          from datetime import datetime, timezone
+
+          d = json.load(sys.stdin)
+          runs = d.get('workflow_runs', [])
+          if not runs:
+              print('::error::No runs of the daily-snapshot workflow were found at all.')
+              sys.exit(1)
+
+          created = runs[0]['created_at']
+          created_dt = datetime.strptime(created, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+          age_hours = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600
+          print(f'Most recent daily-snapshot run started {age_hours:.1f} hours ago ({created}).')
+
+          if age_hours > 20:
+              print(
+                  f'::error::daily-snapshot.yml hasn\'t run in over 20 hours '
+                  f'({age_hours:.1f}h) -- its scheduled cron trigger likely didn\'t '
+                  f'fire (a known GitHub Actions reliability caveat, not necessarily '
+                  f'a code bug). Check the Actions tab, and consider a manual '
+                  f\"'Run workflow' on daily-snapshot.yml.\"
+              )
+              sys.exit(1)
+
+          print('OK -- daily-snapshot.yml ran recently enough.')
+          "

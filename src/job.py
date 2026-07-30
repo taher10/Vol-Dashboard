@@ -3,8 +3,9 @@ src/job.py
 
 OptionsVolJob — orchestrates the full pipeline:
     1. Authenticate with Schwab
-    2. Fetch SPX options chain + price history
-    3. Persist raw snapshots (CSV)
+    2. Fetch SPX options chain (options-only -- no price-history fetch; see
+       run()'s docstring for why)
+    3. Persist raw snapshot (CSV)
     4. Compute all volatility metrics
     5. Persist computed metrics (CSV)
 
@@ -37,7 +38,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from src.auth import SchwabAuth
-from src.data_quality import LiveDataUnavailableError, is_chain_usable
+from src.data_quality import LiveDataUnavailableError, is_chain_usable, is_regular_market_hours
 from src.data_store import CSVStore
 from src.metrics import VolatilityMetrics
 from src.options_fetcher import OptionsFetcher
@@ -108,8 +109,18 @@ class OptionsVolJob:
     def run(self) -> dict[str, pd.DataFrame]:
         """
         Execute the full daily pipeline:
-          authenticate → fetch chain → fetch prices → save raw →
+          authenticate → fetch chain → save raw →
           compute all metrics → save metrics.
+
+        Deliberately options-only: this used to also fetch 1yr daily price
+        history per symbol (1 extra API call/symbol/day) to compute VRP
+        (realized vol vs. implied). Removed by request -- stock/price data is
+        readily available elsewhere, options-chain coverage across more
+        symbols is the priority, and every extra call here is one fewer
+        available for options coverage under the shared rate limiter (see
+        options_fetcher._SCHWAB_RATE_LIMITER). VRP is left NaN/unavailable
+        everywhere downstream (Overview/Drilldown already show a "needs price
+        history" message for exactly this case) rather than silently wrong.
 
         Returns a dict of metrics DataFrames keyed by metric name.
         """
@@ -146,34 +157,44 @@ class OptionsVolJob:
             # daily GitHub Actions job) can tell the user/log "live data
             # unavailable, still showing the last good snapshot" rather than
             # either crashing or quietly serving garbage.
+            #
+            # The message deliberately differs by whether we're actually
+            # inside regular market hours right now: a quote gap outside
+            # hours is the normal, expected case, but the *same* gap during
+            # a normal trading session is NOT explained by "outside market
+            # hours" and is far more likely a real Schwab-side problem --
+            # this is caught and logged as merely "skipped (benign)" by
+            # daily_snapshot.py either way (same exception type), so the
+            # message text is the only signal that distinguishes them in the
+            # step-summary breakdown it writes.
+            if is_regular_market_hours():
+                raise LiveDataUnavailableError(
+                    f"Live pull for {self.save_symbol} returned no usable quotes "
+                    f"(Schwab's no-quote sentinel on impliedVolatility) DURING regular "
+                    f"US market hours -- this is NOT the expected after-hours case, and "
+                    f"is more likely a real Schwab API problem (outage, entitlement issue) "
+                    f"than a timing artifact. Keeping the last saved snapshot."
+                )
             raise LiveDataUnavailableError(
                 f"Live pull for {self.save_symbol} returned no usable quotes "
                 f"(Schwab's no-quote sentinel on impliedVolatility) -- likely outside "
                 f"market hours. Keeping the last saved snapshot."
             )
 
-        logger.info("Fetching price history ...")
-        prices = fetcher.fetch_price_history()
-        logger.info("Prices: %d rows (%s → %s)",
-                    len(prices),
-                    prices["datetime"].iloc[0].date(),
-                    prices["datetime"].iloc[-1].date())
-
         # 3. Persist raw
         self._store.save_chain(chain)
-        self._store.save_price_history(prices)
 
-        # 3b. Persist raw into the accumulating Schwab Database (options +
-        # stock_prices tables) -- see src/schwab_database.py. Only reached
-        # once the chain has passed the usability check above, so this
-        # table never accumulates garbage -999 rows either.
+        # 3b. Persist raw into the accumulating Schwab Database (options
+        # table) -- see src/schwab_database.py. Only reached once the chain
+        # has passed the usability check above, so this table never
+        # accumulates garbage -999 rows either.
         snapshot_date = datetime.now(UTC).date()
         self._db.append_options_snapshot(self.save_symbol, snapshot_date, chain)
-        self._db.append_price_history(self.save_symbol, prices)
 
-        # 4. Compute metrics
+        # 4. Compute metrics (no price history -- see run()'s docstring;
+        # VRP comes back NaN/absent, everything else is unaffected)
         logger.info("Computing volatility metrics ...")
-        vm = VolatilityMetrics(chain, price_history=prices)
+        vm = VolatilityMetrics(chain, price_history=None)
         results = vm.compute_all(target_delta=self.target_delta, rv_window=self.rv_window)
 
         # 5. Persist metrics

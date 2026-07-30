@@ -1,6 +1,6 @@
 # Vol Dashboard
 
-An SPX/equity options-volatility pipeline and web dashboard: pull option chains and price history from the Schwab API, compute vol-surface metrics (term structure, skew, curvature, VRP), persist everything to CSV/SQLite, and explore contracts and build risk-defined trade structures interactively.
+An SPX/equity options-volatility pipeline and web dashboard: pull option chains from the Schwab API (options-only — see below), compute vol-surface metrics (term structure, skew, curvature), persist everything to CSV/SQLite, and explore contracts and build risk-defined trade structures interactively.
 
 ## Web app
 
@@ -16,8 +16,8 @@ It deliberately has no auth, no live "refresh data" action (refreshing stays an 
 
 ```
 src/auth.py              Schwab OAuth (schwab-py) — reads config.ini or .env
-src/options_fetcher.py   Pulls monthly SPX option chains + price history from Schwab
-src/metrics.py           VolatilityMetrics — term structure, skew, curvature, realized vol, VRP
+src/options_fetcher.py   Pulls option chains from Schwab (weekly + monthly expiries), rate-limited
+src/metrics.py           VolatilityMetrics — term structure, skew, curvature (+ VRP if price history is present)
 src/data_store.py        CSVStore — persists/loads snapshots under data/raw and data/processed
 src/job.py               OptionsVolJob — orchestrates auth -> fetch -> save -> compute -> save
 src/charts.py            Static matplotlib PNG charts from the latest saved metrics (-> charts/)
@@ -28,7 +28,9 @@ src/dashboard/decision_engine.py   Pure pandas: score_expiries() (expiry richnes
 src/dashboard/strategy_engine.py   Pure pandas: recommend_trade() -- one sized vertical spread for a stated direction/timeline/risk/capital
 ```
 
-**Pipeline (`src/job.py`)**: authenticate with Schwab → fetch a chain (weekly expiries through 60 DTE + the full monthly cadence beyond, ±N strikes around ATM per expiry, `data_dir`/expiry window/strike spacing configurable) and 1yr daily price history → save both as CSV under `data/raw/` → compute `term_structure`, `skew`, `skew_ratio`, `curvature`, and (if price history is available) `vrp` → save each under `data/processed/`. Re-running on the same UTC day overwrites that day's files.
+**Pipeline (`src/job.py`)**: authenticate with Schwab → fetch a chain (weekly expiries through 60 DTE + the full monthly cadence beyond, ±N strikes around ATM per expiry, `data_dir`/expiry window/strike spacing configurable) → save as CSV under `data/raw/` → compute `term_structure`, `skew`, `skew_ratio`, `curvature` → save each under `data/processed/`. Re-running on the same UTC day overwrites that day's files.
+
+**Deliberately options-only, no price-history fetch.** An earlier version also pulled 1yr daily price history per symbol (1 extra API call/symbol/day) to compute VRP (implied vs. realized vol). Removed by request: stock/price data is readily available elsewhere, and every call spent on it is one fewer available for options coverage under the shared rate limiter (`options_fetcher._SCHWAB_RATE_LIMITER`, ~100 req/min). `vrp` is simply absent from a fresh pull's metrics now — the dashboard already shows a "needs price history" message for this case rather than a wrong number.
 
 **Data layer (`src/dashboard/`)**: read by the FastAPI backend (`src/api/`), never talks to Schwab directly except via `POST /api/refresh` (re-runs the job). `strategy_engine.recommend_trade()` turns a stated bullish/bearish view, timeline, risk appetite, and available capital into exactly one concrete vertical-spread recommendation — sized to that capital — with closed-form max profit/loss/breakeven/payoff, for the Strategy Builder.
 
