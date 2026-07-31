@@ -74,6 +74,22 @@ python -m src.charts             # generate static PNG charts into charts/
   ```
   `SCHWAB_TOKEN_B64` is `base64 -i token.json | tr -d '\n'` run locally after a one-time `python -m src.job --first-time` — see `write_token_from_base64` above.
 
+  **Keeping the token alive without re-authenticating every week.** Schwab's refresh token is only valid ~7 days and rotates on every use (a new refresh token invalidates the previous one). Since each scheduled run starts from a fresh, ephemeral GitHub Actions runner, whatever schwab-py refreshes `token.json` to *during* a run is normally lost the moment that run ends — the next day's run goes back to `SCHWAB_TOKEN_B64`'s original bytes, and once Schwab's rotation invalidates that frozen token, every run fails with `invalid_grant` until someone manually redoes the OAuth flow and re-uploads the secret.
+
+  `src/token_sync.py` closes that loop: after every run, it re-encrypts whatever `token.json` is currently on disk and pushes it back to `SCHWAB_TOKEN_B64` via the GitHub API, so the next run always starts from the freshest refresh token. As long as the workflow fires at least once within the 7-day window (it's scheduled daily), this should keep running indefinitely without manual re-auth. To enable it, add one more secret:
+  ```
+  SECRETS_PAT   # a GitHub PAT that can manage this repo's Actions secrets:
+                #   classic PAT -> 'repo' scope
+                #   fine-grained PAT -> this repo, 'Secrets' permission = Read and write
+  ```
+  Without `SECRETS_PAT`, everything still works exactly as before (the sync step just no-ops) — you'll simply need to redo `python -m src.job --first-time` and re-upload `SCHWAB_TOKEN_B64` by hand whenever the refresh token eventually expires.
+
+  **Failure notifications.** Set `NOTIFY_WEBHOOK_URL` (a Slack or Discord incoming-webhook URL) as a repo secret and:
+  - `src/daily_snapshot.py` posts a one-line alert there if any symbol *actually* fails (not the expected "no live quotes outside market hours" skip) — including a clear call-out when the failure is the refresh-token-expired case above.
+  - `.github/workflows/pipeline-heartbeat.yml` posts there if the scheduled `daily-snapshot.yml` run itself didn't fire at all (a known GitHub Actions cron reliability gap — see that workflow's comments).
+
+  Both are no-ops if `NOTIFY_WEBHOOK_URL` isn't set — GitHub's own default failure-email notifications still apply either way.
+
 ## Notes
 
 - `data/`, `.env`, `config.ini`, and `token.json` are gitignored (per `.gitignore`) since they hold credentials/tokens or can grow large — `.env.example` and `config.ini.example` are the checked-in templates. `history/vol_history.db` is deliberately **not** gitignored — see above.

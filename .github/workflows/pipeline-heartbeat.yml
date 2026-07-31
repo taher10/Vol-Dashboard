@@ -57,3 +57,18 @@ jobs:
 
           print('OK -- daily-snapshot.yml ran recently enough.')
           "
+
+      # GitHub's default failure email only reaches the account that owns/
+      # watches this repo's Actions runs -- a webhook is more visible/
+      # immediate if that's not being checked daily. No-op if
+      # NOTIFY_WEBHOOK_URL isn't configured.
+      - name: Notify if daily-snapshot hasn't run recently
+        if: failure()
+        env:
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -n "$NOTIFY_WEBHOOK_URL" ]; then
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              -d "{\"text\": \"Vol Dashboard: daily-snapshot.yml hasn't run in over 20 hours -- its scheduled trigger likely didn't fire. Check the Actions tab: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/daily-snapshot.yml\", \"content\": \"Vol Dashboard: daily-snapshot.yml hasn't run in over 20 hours -- its scheduled trigger likely didn't fire. Check the Actions tab: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/daily-snapshot.yml\"}" \
+              "$NOTIFY_WEBHOOK_URL"
+          fi
