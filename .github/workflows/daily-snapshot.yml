@@ -20,6 +20,19 @@ name: Daily vol snapshot
 # Requires these repo secrets (Settings -> Secrets and variables -> Actions),
 # same values as the Streamlit Cloud secrets -- see README.md:
 #   SCHWAB_API_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL, SCHWAB_TOKEN_B64
+#
+# Two more secrets fix the "refresh token dies after ~7 days" problem and add
+# failure alerts -- both optional but strongly recommended (see README.md):
+#   SECRETS_PAT        A GitHub PAT with permission to manage this repo's
+#                       Actions secrets (classic 'repo' scope, or fine-grained
+#                       with 'Secrets: write'). Lets src/token_sync.py push
+#                       the freshly-refreshed token.json back to
+#                       SCHWAB_TOKEN_B64 after every run, so the daily cron
+#                       itself keeps the refresh token alive indefinitely --
+#                       no more manual re-auth every week.
+#   NOTIFY_WEBHOOK_URL  A Slack or Discord incoming-webhook URL. If a symbol
+#                       fails (not just the expected "no live quotes" skip),
+#                       src/notify.py posts a one-line alert there.
 
 on:
   schedule:
@@ -59,7 +72,19 @@ jobs:
           SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
           SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
           SCHWAB_CALLBACK_URL: ${{ secrets.SCHWAB_CALLBACK_URL }}
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
         run: python -m src.daily_snapshot
+
+      # Runs even if the step above hit per-symbol failures -- schwab-py may
+      # still have refreshed the token in place before a later symbol failed
+      # for an unrelated reason, and that refreshed token is still worth
+      # keeping. Only truly skips work if SECRETS_PAT isn't configured (see
+      # src/token_sync.py).
+      - name: Persist refreshed token back to SCHWAB_TOKEN_B64
+        if: always()
+        env:
+          SECRETS_PAT: ${{ secrets.SECRETS_PAT }}
+        run: python -m src.token_sync
 
       - name: Commit history if it changed
         run: |
@@ -68,3 +93,17 @@ jobs:
           git add history/vol_history.db database/schwab_database.db
           git diff --staged --quiet || git commit -m "Daily vol snapshot $(date -u +%F)"
           git push
+
+      # Fallback alert for failures src/daily_snapshot.py's own notify() call
+      # never got a chance to send -- e.g. "Restore token.json from secret"
+      # or "Install dependencies" failing before the Python pipeline even runs.
+      - name: Notify on workflow-level failure
+        if: failure()
+        env:
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -n "$NOTIFY_WEBHOOK_URL" ]; then
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              -d "{\"text\": \"Vol Dashboard: daily-snapshot workflow failed before/outside the per-symbol pipeline -- check the Actions run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\", \"content\": \"Vol Dashboard: daily-snapshot workflow failed before/outside the per-symbol pipeline -- check the Actions run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$NOTIFY_WEBHOOK_URL"
+          fi
