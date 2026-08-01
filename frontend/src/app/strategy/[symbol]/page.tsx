@@ -258,6 +258,12 @@ export default function StrategyBuilderPage() {
                     </p>
                   )
                 )}
+
+                {data?.commentary && (
+                  <div className="rounded-md border border-border bg-accent/60 px-3 py-2 text-sm text-accent-foreground">
+                    {data.commentary}
+                  </div>
+                )}
               </div>
             )}
           </ChartCard>

@@ -274,6 +274,59 @@ class HistoryStore:
             "n_observations": len(series),
         }
 
+    def atm_iv_zscore_by_dte(
+        self, symbol: str, dtes: list[int], lookback_days: int = 365
+    ) -> dict[int, dict]:
+        """
+        Per-expiry trailing z-score of ATM IV against `symbol`'s own history
+        at ~that DTE, for every dte in `dtes` -- one query instead of one
+        round-trip per expiry (score_expiries() needs a value for every row
+        in the chain, and this gets called once per symbol per request).
+
+        This is the price-history-free richness signal: VRP richness needs
+        realized vol, which needs price history the pipeline stopped
+        collecting (see job.py), but this only needs the ATM IV time series
+        metric_history already accumulates every day regardless.
+
+        Returns {dte: {"current_iv", "zscore", "n_observations"}} for
+        buckets with >=3 historical points and nonzero variance -- same
+        minimum trailing_zscore() itself uses. dtes without enough history
+        are simply absent, not zero-filled.
+        """
+        if not dtes:
+            return {}
+        cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+        with self._connect() as conn:
+            raw = pd.read_sql_query(
+                """
+                SELECT snapshot_date, dte, atm_iv
+                FROM metric_history
+                WHERE symbol = ? AND snapshot_date >= ? AND atm_iv IS NOT NULL
+                """,
+                conn,
+                params=(symbol, cutoff),
+            )
+        if raw.empty:
+            return {}
+
+        result: dict[int, dict] = {}
+        for target_dte in set(dtes):
+            df = raw.copy()
+            df["dte_distance"] = (df["dte"] - target_dte).abs()
+            nearest = df.sort_values(["snapshot_date", "dte_distance"]).groupby("snapshot_date").first()
+            series = nearest["atm_iv"]
+            if len(series) < 3:
+                continue
+            std = series.std()
+            if not std or pd.isna(std):
+                continue
+            result[target_dte] = {
+                "current_iv": float(series.iloc[-1]),
+                "zscore": float((series.iloc[-1] - series.mean()) / std),
+                "n_observations": int(len(series)),
+            }
+        return result
+
     def prior_snapshot(self, symbol: str, days_ago: int = 1) -> pd.DataFrame | None:
         """
         The full per-expiry metrics row-set from the Nth most recent stored

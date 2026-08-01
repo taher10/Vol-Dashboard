@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { SiteHeader } from "@/components/site-header";
 import { ChartCard } from "@/components/chart-card";
+import { InsightPanel } from "@/components/insight-panel";
 import { StatCard } from "@/components/stat-card";
 import { SmileChart } from "@/components/charts/smile-chart";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -148,10 +149,14 @@ export default function ExpiryDrilldownPage() {
                   value={score.richness_label}
                   accent={key === "cheap" ? "good" : key === "rich" ? "critical" : "neutral"}
                   sub={score.skew_bias}
-                  hint="This expiry's IV vs. its own realized vol, ranked against neighboring expiries. Rich favors selling premium, Cheap favors buying."
+                  hint={`This expiry's IV vs. its own ${
+                    score.richness_basis === "vrp" ? "realized vol" : "historical IV range"
+                  }. Rich favors selling premium, Cheap favors buying.`}
                 />
               </div>
             )}
+
+            {data.commentary && <InsightPanel commentary={data.commentary} symbol={symbol} />}
 
             <ChartCard title={`Volatility Smile — ${fmtDate(data.expiration)}`}>
               <SmileChart points={data.smile} />

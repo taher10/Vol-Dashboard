@@ -22,7 +22,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from src.data_quality import LiveDataUnavailableError
-from src.dashboard import data_loader, decision_engine, strategy_engine
+from src.dashboard import data_loader, decision_engine, insights, strategy_engine
 from src.dashboard.data_loader import SnapshotBundle
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
@@ -39,6 +39,20 @@ _METRIC_NAMES = ("term_structure", "skew", "skew_ratio", "curvature", "vrp")
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+_history_store = HistoryStore()
+
+
+def _iv_zscore_lookup(symbol: str, metrics: dict[str, pd.DataFrame]) -> dict[int, dict]:
+    """Trailing IV z-score per dte currently on the chain, for score_expiries()'s
+    richness signal -- computed here (not inside score_expiries itself) since it
+    needs DB access that function deliberately doesn't have."""
+    ts = metrics.get("term_structure")
+    if ts is None or ts.empty or "dte" not in ts.columns:
+        return {}
+    dtes = [int(d) for d in ts["dte"].dropna().unique()]
+    return _history_store.atm_iv_zscore_by_dte(symbol, dtes)
 
 
 def _load_bundle(symbol: str) -> SnapshotBundle:
@@ -164,7 +178,9 @@ def overview(
     expiry_scores = None
     if primary in filtered_metrics and "term_structure" in filtered_metrics[primary]:
         try:
-            expiry_scores = decision_engine.score_expiries(filtered_metrics[primary])
+            expiry_scores = decision_engine.score_expiries(
+                filtered_metrics[primary], _iv_zscore_lookup(primary, filtered_metrics[primary])
+            )
         except ValueError:
             expiry_scores = None
 
@@ -172,16 +188,32 @@ def overview(
     if len(bundles) > 1:
         for sym, metrics in filtered_metrics.items():
             try:
-                scores = decision_engine.score_expiries(metrics)
+                scores = decision_engine.score_expiries(metrics, _iv_zscore_lookup(sym, metrics))
             except ValueError:
                 continue
-            valid = scores.dropna(subset=["vrp_z"])
+            valid = scores.dropna(subset=["richness_z"])
             if not valid.empty:
-                basket_ranks[sym] = float(valid.loc[valid["vrp_z"].abs().idxmax(), "vrp_z"])
+                basket_ranks[sym] = float(valid.loc[valid["richness_z"].abs().idxmax(), "richness_z"])
 
     takeaway = None
     if expiry_scores is not None:
         takeaway = decision_engine.build_takeaway(primary, expiry_scores, basket_ranks)
+
+    commentary = None
+    if expiry_scores is not None and not expiry_scores.empty:
+        # Prefer the most richness-notable expiry (same selection build_takeaway
+        # uses). Falls back to the most skewed expiry with real wing data when no
+        # richness signal is available at all (neither trailing IV history nor
+        # VRP) -- skew comes straight off the chain's own delta/IV surface, so
+        # it's always there even when richness isn't.
+        richness_valid = expiry_scores.dropna(subset=["richness_z"])
+        if not richness_valid.empty:
+            notable_row = expiry_scores.loc[richness_valid["richness_z"].abs().idxmax()]
+        else:
+            skew_valid = expiry_scores[expiry_scores["has_wing_data"]].dropna(subset=["skew"])
+            notable_row = expiry_scores.loc[skew_valid["skew"].abs().idxmax()] if not skew_valid.empty else None
+        if notable_row is not None:
+            commentary = _commentary_record(insights.expiry_commentary(bundles[primary].chain, notable_row))
 
     return {
         "primary": primary,
@@ -191,6 +223,7 @@ def overview(
         "symbols": payload_symbols,
         "expiry_scores": df_records(expiry_scores) if expiry_scores is not None else [],
         "takeaway": takeaway,
+        "commentary": commentary,
     }
 
 
@@ -219,9 +252,10 @@ def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
     smile = df_records(expiry_chain[smile_cols].dropna(subset=["delta", "impliedVolatility"]))
 
     score_row = None
+    commentary = None
     neighbors: list[dict] = []
     try:
-        expiry_scores = decision_engine.score_expiries(bundle.metrics)
+        expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
     except ValueError:
         expiry_scores = None
 
@@ -231,6 +265,7 @@ def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
         if match_idx:
             idx = match_idx[0]
             score_row = series_record(expiry_scores.iloc[idx])
+            commentary = _commentary_record(insights.expiry_commentary(chain, expiry_scores.iloc[idx]))
             if idx > 0:
                 neighbors.append({"position": "previous", **series_record(expiry_scores.iloc[idx - 1])})
             neighbors.append({"position": "selected", **series_record(expiry_scores.iloc[idx])})
@@ -244,6 +279,7 @@ def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
         "underlying_price": _underlying_price(expiry_chain),
         "smile": smile,
         "score": score_row,
+        "commentary": commentary,
         "neighbors": neighbors,
     }
 
@@ -284,6 +320,15 @@ def _candidate_record(c: strategy_engine.Candidate) -> dict:
     }
 
 
+def _commentary_record(c: insights.Commentary) -> dict:
+    return {
+        "headline": c.headline,
+        "interpretation": c.interpretation,
+        "trade_angle": c.trade_angle,
+        "example_trade": _candidate_record(c.example_trade) if c.example_trade is not None else None,
+    }
+
+
 def _sizing_record(s: strategy_engine.PositionSizing) -> dict:
     return {
         "capital_available": clean_value(s.capital_available),
@@ -312,6 +357,19 @@ def recommend_strategy(
 
     rec = strategy_engine.recommend_trade(chain, direction=direction, timeline=timeline, risk=risk, capital=capital)
 
+    commentary = None
+    if rec is not None:
+        score_row = None
+        try:
+            expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
+        except ValueError:
+            expiry_scores = None
+        if expiry_scores is not None and not expiry_scores.empty:
+            match = expiry_scores[expiry_scores["expiration"].dt.date == pd.Timestamp(rec.candidate.expiration).date()]
+            if not match.empty:
+                score_row = match.iloc[0]
+        commentary = insights.recommendation_commentary(score_row, rec.candidate)
+
     return {
         "symbol": symbol,
         "direction": direction,
@@ -320,14 +378,13 @@ def recommend_strategy(
         "spot": _underlying_price(chain),
         "recommendation": _candidate_record(rec.candidate) if rec else None,
         "sizing": _sizing_record(rec.sizing) if rec and rec.sizing else None,
+        "commentary": commentary,
     }
 
 
 # ---------------------------------------------------------------------------
 # History (IV Rank / trailing z-score) — bonus stat-tile data
 # ---------------------------------------------------------------------------
-
-_history_store = HistoryStore()
 
 
 @router.get("/history/{symbol}/iv-rank")

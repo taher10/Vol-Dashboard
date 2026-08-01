@@ -25,7 +25,7 @@ export function RichnessTable({
             <TableHead>Expiration</TableHead>
             <TableHead className="text-right">DTE</TableHead>
             <TableHead className="text-right">ATM IV</TableHead>
-            <TableHead className="text-right">VRP z</TableHead>
+            <TableHead className="text-right">Richness z</TableHead>
             <TableHead>IV Richness</TableHead>
             <TableHead>Put/Call Skew</TableHead>
             <TableHead className="text-right">Curvature</TableHead>
@@ -43,7 +43,7 @@ export function RichnessTable({
                 <TableCell className="font-medium">{fmtDate(row.expiration)}</TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{row.dte}</TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.atm_iv, 2)}</TableCell>
-                <TableCell className="text-right font-mono tabular-nums">{fmtSigned(row.vrp_z, 2)}</TableCell>
+                <TableCell className="text-right font-mono tabular-nums">{fmtSigned(row.richness_z, 2)}</TableCell>
                 <TableCell>
                   <span
                     className="inline-flex rounded-full px-2 py-0.5 text-xs font-medium"
@@ -61,8 +61,8 @@ export function RichnessTable({
       </Table>
       <p className="mt-3 text-xs text-muted-foreground">
         <strong className="font-medium text-foreground">IV Richness</strong> compares this expiry&apos;s implied
-        vol to its own realized vol, ranked against the other expiries in view — Rich favors selling premium,
-        Cheap favors buying.{" "}
+        vol to its own historical baseline (trailing IV history, or realized vol when that&apos;s available) —
+        Rich favors selling premium, Cheap favors buying.{" "}
         <strong className="font-medium text-foreground">Put/Call Skew</strong> is separate: within this expiry&apos;s
         smile, which side is priced richer relative to the other.
       </p>

@@ -99,6 +99,9 @@ export interface ExpiryScoreRow {
   realized_vol?: number | null;
   vrp: number | null;
   vrp_z: number | null;
+  iv_z: number | null;
+  richness_z: number | null;
+  richness_basis: "iv_history" | "vrp" | null;
   richness_label: string;
   skew_bias: string;
   has_wing_data: boolean;
@@ -113,6 +116,14 @@ export interface SymbolOverview {
   vrp: VrpPoint[] | null;
 }
 
+/** example_trade mirrors StrategyCandidate (declared below) -- same shape, reused rather than duplicated. */
+export interface Commentary {
+  headline: string;
+  interpretation: string;
+  trade_angle: string;
+  example_trade: StrategyCandidate | null;
+}
+
 export interface OverviewResponse {
   primary: string;
   as_of: string;
@@ -121,6 +132,7 @@ export interface OverviewResponse {
   symbols: Record<string, SymbolOverview>;
   expiry_scores: ExpiryScoreRow[];
   takeaway: string | null;
+  commentary: Commentary | null;
 }
 
 export interface SmilePoint {
@@ -142,6 +154,7 @@ export interface ExpiryResponse {
   underlying_price: number | null;
   smile: SmilePoint[];
   score: ExpiryScoreRow | null;
+  commentary: Commentary | null;
   neighbors: (ExpiryScoreRow & { position: string })[];
 }
 
@@ -207,6 +220,7 @@ export interface RecommendResponse {
   spot: number | null;
   recommendation: StrategyCandidate | null;
   sizing: PositionSizing | null;
+  commentary: string | null;
 }
 
 export interface RecommendQueryParams {

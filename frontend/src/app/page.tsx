@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { SiteHeader } from "@/components/site-header";
 import { ChartCard } from "@/components/chart-card";
 import { ChartLegend, MetricLineChart, type MetricSeries } from "@/components/charts/metric-line-chart";
+import { InsightPanel } from "@/components/insight-panel";
 import { RichnessTable } from "@/components/richness-table";
 import { StatCard } from "@/components/stat-card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -103,7 +104,10 @@ export default function OverviewPage() {
             <Skeleton className="h-16 w-full max-w-2xl" />
           ) : (
             <>
-              {data?.takeaway && (
+              {/* InsightPanel below covers this same ground in more depth once commentary is
+                  available; only fall back to the plain one-liner when it isn't (e.g. no
+                  richness signal at all yet) so the two don't restate the same fact twice. */}
+              {data?.takeaway && !data?.commentary && (
                 <div className="flex-1 rounded-lg border border-border bg-accent/60 px-4 py-3 text-sm text-accent-foreground">
                   {data.takeaway}
                 </div>
@@ -134,6 +138,12 @@ export default function OverviewPage() {
                 ) : null
               )}
             </span>
+          </div>
+        )}
+
+        {data?.commentary && (
+          <div className="mb-4">
+            <InsightPanel commentary={data.commentary} symbol={data.primary} />
           </div>
         )}
 
