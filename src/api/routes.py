@@ -81,6 +81,17 @@ def _match_expiration(df: pd.DataFrame, expiration: str, col: str = "expiration"
     return df[df[col].dt.date == target]
 
 
+def _underlying_price(chain: pd.DataFrame | None) -> float | None:
+    """Most recent underlyingPrice quoted anywhere in the chain (same value
+    repeated per-contract, so any non-null row works) -- lets the UI show a
+    trader the actual spot/underlying price, which nothing currently
+    surfaces despite it being on every row of the chain already."""
+    if chain is None or chain.empty or "underlyingPrice" not in chain.columns:
+        return None
+    values = chain["underlyingPrice"].dropna()
+    return float(values.iloc[0]) if not values.empty else None
+
+
 def _expirations_list(chain: pd.DataFrame) -> list[dict]:
     if chain is None or chain.empty or "expiration" not in chain.columns:
         return []
@@ -143,6 +154,7 @@ def overview(
     for sym, metrics in filtered_metrics.items():
         payload_symbols[sym] = {
             "color": SYMBOL_REGISTRY[sym].color,
+            "underlying_price": _underlying_price(bundles[sym].chain),
             "term_structure": df_records(metrics.get("term_structure")),
             "skew": df_records(metrics.get("skew")),
             "curvature": df_records(metrics.get("curvature")),
@@ -229,6 +241,7 @@ def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
         "symbol": symbol,
         "expiration": expiration,
         "expirations": expirations,
+        "underlying_price": _underlying_price(expiry_chain),
         "smile": smile,
         "score": score_row,
         "neighbors": neighbors,

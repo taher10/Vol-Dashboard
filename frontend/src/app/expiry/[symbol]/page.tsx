@@ -10,10 +10,15 @@ import { SmileChart } from "@/components/charts/smile-chart";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { api, ApiError, type ExpiryResponse } from "@/lib/api";
-import { fmtDate, fmtNum } from "@/lib/format";
+import { api, ApiError, type ExpiryResponse, type ZScore } from "@/lib/api";
+import { fmtDate, fmtNum, fmtSigned } from "@/lib/format";
 import { RICHNESS_BG, RICHNESS_TEXT, richnessKey } from "@/lib/theme";
 import { useSettingsStore } from "@/lib/store";
+
+function zscoreSub(z: ZScore | null): string | undefined {
+  if (!z) return "Needs 3+ sessions at this DTE for context";
+  return `z=${fmtSigned(z.zscore, 1)} vs. trailing avg — ${Math.abs(z.zscore) >= 1.5 ? "unusual" : "typical"} for this name`;
+}
 
 export default function ExpiryDrilldownPage() {
   const params = useParams<{ symbol: string }>();
@@ -26,6 +31,9 @@ export default function ExpiryDrilldownPage() {
   const [data, setData] = useState<ExpiryResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ivZ, setIvZ] = useState<ZScore | null>(null);
+  const [skewZ, setSkewZ] = useState<ZScore | null>(null);
+  const [curvatureZ, setCurvatureZ] = useState<ZScore | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +53,34 @@ export default function ExpiryDrilldownPage() {
       cancelled = true;
     };
   }, [symbol, urlExpiration, refreshNonce]);
+
+  // Trailing z-score for the metrics above, computed at THIS expiry's actual
+  // DTE (not a fixed default) so "is -0.55 normal for this name" is answered
+  // apples-to-apples with what's on screen, not some other maturity.
+  useEffect(() => {
+    const dte = data?.score?.dte;
+    if (dte == null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- resetting derived state when its input disappears, not a fetch-in-progress race
+      setIvZ(null);
+      setSkewZ(null);
+      setCurvatureZ(null);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      api.zscore(symbol, "atm_iv", dte).catch(() => null),
+      api.zscore(symbol, "skew", dte).catch(() => null),
+      api.zscore(symbol, "curvature", dte).catch(() => null),
+    ]).then(([iv, skew, curvature]) => {
+      if (cancelled) return;
+      setIvZ(iv);
+      setSkewZ(skew);
+      setCurvatureZ(curvature);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, data?.score?.dte]);
 
   const handleExpirationChange = (expiration: string) => {
     router.push(`/expiry/${symbol}?expiration=${encodeURIComponent(expiration)}`);
@@ -80,20 +116,32 @@ export default function ExpiryDrilldownPage() {
                   ))}
                 </SelectContent>
               </Select>
+              {data.underlying_price != null && (
+                <span className="font-mono text-sm tabular-nums text-muted-foreground">
+                  Spot ${fmtNum(data.underlying_price, 2)}
+                </span>
+              )}
             </div>
 
             {score && (
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                <StatCard label="ATM IV" value={fmtNum(score.atm_iv, 2)} hint="At-the-money implied volatility for this expiry." />
+                <StatCard
+                  label="ATM IV"
+                  value={fmtNum(score.atm_iv, 2)}
+                  hint="At-the-money implied volatility for this expiry."
+                  sub={zscoreSub(ivZ)}
+                />
                 <StatCard
                   label="Skew"
                   value={fmtNum(score.skew, 2)}
                   hint="IV(25Δ put) − IV(25Δ call). Positive means puts are priced richer than calls."
+                  sub={zscoreSub(skewZ)}
                 />
                 <StatCard
                   label="Curvature"
                   value={fmtNum(score.curvature, 2)}
                   hint="Butterfly: average of 25Δ put/call IV minus ATM IV — how much the wings are priced up relative to the middle."
+                  sub={zscoreSub(curvatureZ)}
                 />
                 <StatCard
                   label="Richness"
