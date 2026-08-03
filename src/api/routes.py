@@ -16,13 +16,14 @@ exposed to other users, since it's a mutating, credential-backed action.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from src.data_quality import LiveDataUnavailableError
-from src.dashboard import data_loader, decision_engine, insights, strategy_engine
+from src.dashboard import backtest_engine, data_loader, decision_engine, insights, strategy_engine
 from src.dashboard.data_loader import SnapshotBundle
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
@@ -525,3 +526,102 @@ def contract_history(symbol: str, contract_symbol: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
     df = _schwab_db.contract_history(symbol, contract_symbol)
     return {"symbol": symbol, "contract_symbol": contract_symbol, "history": df_records(df)}
+
+
+# ---------------------------------------------------------------------------
+# Backtest — historical trade simulator (src/dashboard/backtest_engine.py).
+# Entry-date options reuse /history/{symbol}/options-snapshot-dates above --
+# no separate "dates" endpoint needed, same accumulated SchwabDatabase data.
+# ---------------------------------------------------------------------------
+
+
+def _equity_point_record(p: backtest_engine.EquityPoint) -> dict:
+    return {
+        "date": p.date.isoformat(),
+        "dte_remaining": p.dte_remaining,
+        "pnl_per_share": clean_value(p.pnl_per_share),
+        "underlying_price": clean_value(p.underlying_price),
+    }
+
+
+def _backtest_result_record(r: backtest_engine.BacktestResult) -> dict:
+    return {
+        "entry_date": r.entry_date.isoformat(),
+        "entry_candidate": _candidate_record(r.entry_candidate),
+        "equity_curve": [_equity_point_record(p) for p in r.equity_curve],
+        "status": r.status,
+        "final_pnl_per_share": clean_value(r.final_pnl_per_share),
+        "days_held": r.days_held,
+        "summary": r.summary,
+    }
+
+
+def _history_snapshots(symbol: str, since: date) -> dict[date, pd.DataFrame]:
+    """Every recorded raw option-chain snapshot for `symbol` strictly after
+    `since`, adapted to the camelCase schema build_vertical() expects --
+    shared by the /expirations and /run backtest endpoints below."""
+    snapshots: dict[date, pd.DataFrame] = {}
+    for d in _schwab_db.options_snapshot_dates(symbol):
+        if d > since:
+            snapshots[d] = backtest_engine.adapt_historical_chain(_schwab_db.options_snapshot(symbol, d))
+    return snapshots
+
+
+@router.get("/backtest/{symbol}/expirations")
+def backtest_expirations(symbol: str, entry_date: str = Query(..., description="ISO date")) -> dict:
+    symbol = symbol.upper()
+    if symbol not in SYMBOL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
+    parsed = _parse_date(entry_date, label="entry date").date()
+    raw = _schwab_db.options_snapshot(symbol, parsed)
+    if raw.empty:
+        raise HTTPException(status_code=404, detail=f"No recorded option chain for '{symbol}' on {entry_date}.")
+    chain = backtest_engine.adapt_historical_chain(raw)
+    return {"symbol": symbol, "entry_date": entry_date, "expirations": _expirations_list(chain)}
+
+
+@router.get("/backtest/{symbol}/run")
+def backtest_run(
+    symbol: str,
+    entry_date: str = Query(..., description="ISO date, must be a recorded snapshot date"),
+    expiration: str = Query(..., description="ISO date"),
+    direction: Literal["bullish", "bearish"] = Query(...),
+    risk: Literal["conservative", "moderate", "aggressive"] = Query(...),
+) -> dict:
+    symbol = symbol.upper()
+    if symbol not in SYMBOL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
+    entry_parsed = _parse_date(entry_date, label="entry date").date()
+    expiration_parsed = _parse_date(expiration, label="expiration date")
+
+    raw_entry = _schwab_db.options_snapshot(symbol, entry_parsed)
+    if raw_entry.empty:
+        raise HTTPException(status_code=404, detail=f"No recorded option chain for '{symbol}' on {entry_date}.")
+    entry_chain = backtest_engine.adapt_historical_chain(raw_entry)
+
+    snapshots = _history_snapshots(symbol, entry_parsed)
+    result = backtest_engine.run_backtest(entry_parsed, entry_chain, snapshots, expiration_parsed, direction, risk)
+
+    if result is None:
+        return {
+            "symbol": symbol,
+            "entry_date": entry_date,
+            "expiration": expiration,
+            "direction": direction,
+            "risk": risk,
+            "result": None,
+            "error": (
+                f"Couldn't build a {risk} {direction} spread for {symbol} on {entry_date} at this expiration -- "
+                "try a different date, expiration, or risk profile."
+            ),
+        }
+
+    return {
+        "symbol": symbol,
+        "entry_date": entry_date,
+        "expiration": expiration,
+        "direction": direction,
+        "risk": risk,
+        "result": _backtest_result_record(result),
+        "error": None,
+    }
