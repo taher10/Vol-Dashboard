@@ -283,6 +283,39 @@ export interface ScannerResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Trade Ideas (cross-symbol actionable trade feed)
+// ---------------------------------------------------------------------------
+
+export interface TradeIdea {
+  symbol: string;
+  color: string;
+  underlying_price: number | null;
+  as_of: string | null;
+  headline: string;
+  structure: string;
+  direction: "bullish" | "bearish";
+  is_credit: boolean;
+  expiration: string;
+  dte: number;
+  legs: StrategyLeg[];
+  net_debit_credit: number;
+  max_profit: number;
+  max_loss: number;
+  reward_risk: number | null;
+  approx_pop: number;
+  breakevens: number[];
+  richness_label: string | null;
+  richness_z: number | null;
+  richness_basis: "iv_history" | "vrp" | null;
+  skew_bias: string | null;
+  skew: number | null;
+}
+
+export interface TradeIdeasResponse {
+  ideas: TradeIdea[];
+}
+
+// ---------------------------------------------------------------------------
 // Backtest (historical trade simulator)
 // ---------------------------------------------------------------------------
 
@@ -382,4 +415,6 @@ export const api = {
     }),
 
   scanner: (targetDte = 30) => apiGet<ScannerResponse>("/api/scanner", { target_dte: targetDte }),
+
+  tradeIdeas: () => apiGet<TradeIdeasResponse>("/api/trade-ideas"),
 };

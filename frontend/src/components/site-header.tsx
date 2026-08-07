@@ -66,7 +66,7 @@ export function SiteHeader({ title }: { title: string }) {
             <nav className="flex flex-col gap-0.5">
               {NAV.map((item) => {
                 const href = item.symbolScoped ? `${item.href}/${primary}` : item.href;
-                const active = item.symbolScoped ? pathname.startsWith(item.href) : pathname === "/";
+                const active = item.symbolScoped ? pathname.startsWith(item.href) : pathname === item.href;
                 const Icon = item.icon;
                 return (
                   <Link

@@ -339,6 +339,19 @@ def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
 
     if expiration is None:
         expiration = expirations[0]["expiration"]
+    else:
+        # Normalize whatever date format the caller passed (e.g. a plain
+        # "YYYY-MM-DD" from Trade Ideas'/Backtest's deep links, vs. the full
+        # ISO-with-time strings _expirations_list() produces) to the exact
+        # string already used in `expirations`, so the returned "expiration"
+        # field always matches one of expirations[].expiration -- otherwise
+        # the frontend's <Select value={data.expiration}> can't find a
+        # matching item and renders blank even though the right data loaded.
+        target_date = _parse_date(expiration, label="expiration date").date()
+        matched = next((e for e in expirations if pd.Timestamp(e["expiration"]).date() == target_date), None)
+        if matched is None:
+            raise HTTPException(status_code=404, detail=f"No expiration '{expiration}' found for '{symbol}'.")
+        expiration = matched["expiration"]
 
     expiry_chain = _match_expiration(chain, expiration)
     smile_cols = [c for c in ("optionType", "delta", "impliedVolatility", "strikePrice") if c in expiry_chain.columns]
@@ -473,6 +486,84 @@ def recommend_strategy(
         "sizing": _sizing_record(rec.sizing) if rec and rec.sizing else None,
         "commentary": commentary,
     }
+
+
+# ---------------------------------------------------------------------------
+# Trade Ideas — cross-symbol feed of real, actionable example trades
+# (src/dashboard/insights.py), moontower-style. Unlike /api/scanner (always
+# 20 rows, nulls for thin data), a symbol only appears here if it actually
+# has a directional edge -- expiry_commentary() returns example_trade=None
+# for a "Balanced" skew_bias, which correctly means no idea, not missing data.
+# ---------------------------------------------------------------------------
+
+
+def _trade_idea(symbol: str) -> dict | None:
+    """One trade idea for `symbol`, built from the exact same "notable
+    expiry" selection and insights.expiry_commentary() call overview()'s
+    own commentary block already uses -- so an idea here is always
+    consistent with what that symbol's Expiry Drilldown would independently
+    show, never a second parallel calculation. Returns None (never raises)
+    when there's nothing to show: no snapshot yet, no scoreable expiries, or
+    the notable expiry's skew_bias is "Balanced" (expiry_commentary() itself
+    returns example_trade=None there -- expected, not an error)."""
+    info = SYMBOL_REGISTRY[symbol]
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return None
+
+    try:
+        expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
+    except ValueError:
+        return None
+    if expiry_scores is None or expiry_scores.empty:
+        return None
+
+    richness_valid = expiry_scores.dropna(subset=["richness_z"])
+    if not richness_valid.empty:
+        notable_row = expiry_scores.loc[richness_valid["richness_z"].abs().idxmax()]
+    else:
+        skew_valid = expiry_scores[expiry_scores["has_wing_data"]].dropna(subset=["skew"])
+        if skew_valid.empty:
+            return None
+        notable_row = expiry_scores.loc[skew_valid["skew"].abs().idxmax()]
+
+    commentary = insights.expiry_commentary(bundle.chain, notable_row)
+    trade = commentary.example_trade
+    if trade is None:
+        return None  # Balanced skew_bias -- no directional edge, correctly no idea here.
+
+    reward_risk = clean_value(trade.max_profit / trade.max_loss) if trade.max_loss > 0 else None
+
+    return {
+        "symbol": symbol,
+        "color": info.color,
+        "underlying_price": _underlying_price(bundle.chain),
+        "as_of": bundle.as_of.isoformat(),
+        "headline": commentary.headline,
+        "structure": trade.structure,
+        "direction": trade.direction,
+        "is_credit": trade.net_debit_credit < 0,
+        "expiration": pd.Timestamp(trade.expiration).date().isoformat(),
+        "dte": trade.dte,
+        "legs": [_leg_record(leg) for leg in trade.legs],
+        "net_debit_credit": clean_value(trade.net_debit_credit),
+        "max_profit": clean_value(trade.max_profit),
+        "max_loss": clean_value(trade.max_loss),
+        "reward_risk": reward_risk,
+        "approx_pop": clean_value(trade.approx_pop),
+        "breakevens": [clean_value(b) for b in trade.breakevens],
+        "richness_label": clean_value(notable_row["richness_label"]),
+        "richness_z": clean_value(notable_row["richness_z"]),
+        "richness_basis": clean_value(notable_row["richness_basis"]),
+        "skew_bias": clean_value(notable_row["skew_bias"]),
+        "skew": clean_value(notable_row["skew"]),
+    }
+
+
+@router.get("/trade-ideas")
+def trade_ideas() -> dict:
+    return {"ideas": [idea for sym in SYMBOL_REGISTRY if (idea := _trade_idea(sym)) is not None]}
 
 
 # ---------------------------------------------------------------------------

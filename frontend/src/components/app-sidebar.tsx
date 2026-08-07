@@ -34,7 +34,7 @@ export function AppSidebar() {
           const href = item.symbolScoped ? `${item.href}/${primary}` : item.href;
           const active = item.symbolScoped
             ? pathname.startsWith(item.href)
-            : pathname === "/";
+            : pathname === item.href;
           const Icon = item.icon;
           return (
             <Link
