@@ -131,6 +131,98 @@ def list_symbols() -> list[SymbolOut]:
 
 
 # ---------------------------------------------------------------------------
+# Scanner — one row per registry symbol, moontower-style sortable table.
+# Unlike /api/overview (scoped to user-selected symbols), this loops over
+# every symbol in SYMBOL_REGISTRY unconditionally: ~20 symbols x (1 disk
+# read + up to 3 SQLite queries each opening/closing their own connection,
+# no pooling) per request. Real but small at this scale (same N-symbol-loop
+# pattern /api/overview's basket_ranks computation already uses) -- not
+# worth a batching layer for an on-demand, unpolled, ~20-row endpoint. The
+# first cheap fix if this ever matters is a short server-side cache (data
+# only changes once/day), not a DB-layer rewrite.
+# ---------------------------------------------------------------------------
+
+
+def _scanner_row(symbol: str, target_dte: int) -> dict:
+    """One representative-expiry row for `symbol` -- the closest-to-
+    target_dte row from score_expiries(), so every field in the row shares
+    one DTE (consistent with iv_rank/atm_iv_zscore_by_dte's own constant-DTE
+    convention, rather than each column picking its own independently-
+    relevant expiry). Never raises for a missing/thin-history symbol --
+    returns a row with nulls in the history-dependent fields instead, since
+    a scanner request must never fail because one of 20 symbols has no
+    snapshot yet (same "report gaps, don't hide them" spirit as /api/
+    overview's missing_symbols list)."""
+    info = SYMBOL_REGISTRY[symbol]
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return {
+            "symbol": symbol,
+            "color": info.color,
+            "underlying_price": None,
+            "as_of": None,
+            "dte": None,
+            "expiration": None,
+            "atm_iv": None,
+            "skew": None,
+            "skew_bias": None,
+            "curvature": None,
+            "richness_z": None,
+            "richness_label": None,
+            "richness_basis": None,
+            "iv_rank": None,
+            "iv_percentile": None,
+            "days_of_history": 0,
+        }
+
+    try:
+        expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
+    except ValueError:
+        expiry_scores = None
+
+    row = None
+    if expiry_scores is not None and not expiry_scores.empty:
+        idx = (expiry_scores["dte"] - target_dte).abs().idxmin()
+        row = expiry_scores.loc[idx]
+
+    ivr = _history_store.iv_rank(symbol, target_dte=target_dte)
+    # Deliberately HistoryStore.snapshot_dates(), not SchwabDatabase.
+    # options_snapshot_dates() -- iv_rank/richness_z are computed from
+    # HistoryStore's metric_history table, which can accumulate a different
+    # number of days than the raw options table (confirmed in practice: two
+    # symbols can show the same raw-snapshot count while one has an extra
+    # metric_history row from an earlier backfill). Showing the raw-table
+    # count here would silently misexplain why iv_rank/richness_z are null
+    # for one symbol but not another with the same displayed "History" value.
+    days_of_history = len(_history_store.snapshot_dates(symbol))
+
+    return {
+        "symbol": symbol,
+        "color": info.color,
+        "underlying_price": _underlying_price(bundle.chain),
+        "as_of": bundle.as_of.isoformat(),
+        "dte": clean_value(row["dte"]) if row is not None else None,
+        "expiration": clean_value(row["expiration"]) if row is not None else None,
+        "atm_iv": clean_value(row["atm_iv"]) if row is not None else None,
+        "skew": clean_value(row["skew"]) if row is not None else None,
+        "skew_bias": clean_value(row["skew_bias"]) if row is not None else None,
+        "curvature": clean_value(row["curvature"]) if row is not None else None,
+        "richness_z": clean_value(row["richness_z"]) if row is not None else None,
+        "richness_label": clean_value(row["richness_label"]) if row is not None else None,
+        "richness_basis": clean_value(row["richness_basis"]) if row is not None else None,
+        "iv_rank": clean_value(ivr["iv_rank"]) if ivr else None,
+        "iv_percentile": clean_value(ivr["iv_percentile"]) if ivr else None,
+        "days_of_history": days_of_history,
+    }
+
+
+@router.get("/scanner")
+def scanner(target_dte: int = Query(30, ge=0, le=3650)) -> dict:
+    return {"target_dte": target_dte, "rows": [_scanner_row(sym, target_dte) for sym in SYMBOL_REGISTRY]}
+
+
+# ---------------------------------------------------------------------------
 # Overview
 # ---------------------------------------------------------------------------
 

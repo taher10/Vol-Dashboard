@@ -255,6 +255,34 @@ export interface PriceBar {
 }
 
 // ---------------------------------------------------------------------------
+// Scanner (cross-symbol snapshot table)
+// ---------------------------------------------------------------------------
+
+export interface ScannerRow {
+  symbol: string;
+  color: string;
+  underlying_price: number | null;
+  as_of: string | null;
+  dte: number | null;
+  expiration: string | null;
+  atm_iv: number | null;
+  skew: number | null;
+  skew_bias: string | null;
+  curvature: number | null;
+  richness_z: number | null;
+  richness_label: string | null;
+  richness_basis: "iv_history" | "vrp" | null;
+  iv_rank: number | null;
+  iv_percentile: number | null;
+  days_of_history: number;
+}
+
+export interface ScannerResponse {
+  target_dte: number;
+  rows: ScannerRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Backtest (historical trade simulator)
 // ---------------------------------------------------------------------------
 
@@ -352,4 +380,6 @@ export const api = {
       direction: params.direction,
       risk: params.risk,
     }),
+
+  scanner: (targetDte = 30) => apiGet<ScannerResponse>("/api/scanner", { target_dte: targetDte }),
 };
