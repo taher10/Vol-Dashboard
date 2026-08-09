@@ -497,23 +497,39 @@ def recommend_strategy(
 # ---------------------------------------------------------------------------
 
 
+_TRADE_IDEA_MAX_DTE = 60  # near-dated only -- see plan: far-dated expiries are illiquid/wide-spread
+                          # and not what a weekly-income-style feed should surface.
+_HIGH_CONVICTION_Z = 1.5  # meaningfully rich, not just barely (the plain "Rich" threshold is 0.5) --
+                          # only reach for an undefined-risk CSP/Covered Call at this conviction level.
+
+
 def _trade_idea(symbol: str) -> dict | None:
     """One trade idea for `symbol`, built from the exact same "notable
     expiry" selection and insights.expiry_commentary() call overview()'s
     own commentary block already uses -- so an idea here is always
     consistent with what that symbol's Expiry Drilldown would independently
     show, never a second parallel calculation. Returns None (never raises)
-    when there's nothing to show: no snapshot yet, no scoreable expiries, or
-    the notable expiry's skew_bias is "Balanced" (expiry_commentary() itself
-    returns example_trade=None there -- expected, not an error)."""
+    when there's nothing to show: no snapshot yet, no scoreable expiries
+    within the DTE window, or the notable expiry's skew_bias is "Balanced"
+    at moderate conviction (expiry_commentary() itself returns
+    example_trade=None there -- expected, not an error).
+
+    At high conviction (richness_z >= _HIGH_CONVICTION_Z) on a "Rich"
+    expiry, prefers an undefined-risk Cash Secured Put or Covered Call over
+    the usual defined-risk vertical -- see strategy_engine.build_cash_secured_put()/
+    build_covered_call() docstrings for the payoff math, and the plan for
+    why this is gated on richness_z (the practically-available signal) even
+    though it doesn't strictly require richness_basis=="vrp" (real VRP data
+    is rarely available now that price history isn't collected)."""
     info = SYMBOL_REGISTRY[symbol]
     try:
         bundle = data_loader.load_latest_snapshot(symbol)
     except FileNotFoundError:
         return None
 
+    metrics = _filter_metrics_by_dte(bundle.metrics, 0, _TRADE_IDEA_MAX_DTE)
     try:
-        expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
+        expiry_scores = decision_engine.score_expiries(metrics, _iv_zscore_lookup(symbol, metrics))
     except ValueError:
         return None
     if expiry_scores is None or expiry_scores.empty:
@@ -529,9 +545,23 @@ def _trade_idea(symbol: str) -> dict | None:
         notable_row = expiry_scores.loc[skew_valid["skew"].abs().idxmax()]
 
     commentary = insights.expiry_commentary(bundle.chain, notable_row)
-    trade = commentary.example_trade
+
+    richness_z = notable_row.get("richness_z")
+    richness_z = float(richness_z) if richness_z is not None and pd.notna(richness_z) else None
+    high_conviction = richness_z is not None and richness_z >= _HIGH_CONVICTION_Z
+    skew_bias = str(notable_row["skew_bias"])
+    expiration = notable_row["expiration"]
+
+    trade = None
+    if high_conviction and notable_row["richness_label"] == "Rich":
+        if skew_bias in ("Puts richer", "Balanced"):
+            trade = strategy_engine.build_cash_secured_put(bundle.chain, expiration)
+        elif skew_bias == "Calls richer":
+            trade = strategy_engine.build_covered_call(bundle.chain, expiration, _underlying_price(bundle.chain))
     if trade is None:
-        return None  # Balanced skew_bias -- no directional edge, correctly no idea here.
+        trade = commentary.example_trade
+    if trade is None:
+        return None  # Balanced skew_bias at moderate conviction -- no directional edge, correctly no idea here.
 
     reward_risk = clean_value(trade.max_profit / trade.max_loss) if trade.max_loss > 0 else None
 
