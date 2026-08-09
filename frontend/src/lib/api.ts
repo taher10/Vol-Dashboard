@@ -135,27 +135,9 @@ export interface OverviewResponse {
   commentary: Commentary | null;
 }
 
-export interface SmilePoint {
-  optionType: "CALL" | "PUT";
-  delta: number;
-  impliedVolatility: number;
-  strikePrice: number;
-}
-
 export interface ExpiryOption {
   expiration: string;
   dte: number;
-}
-
-export interface ExpiryResponse {
-  symbol: string;
-  expiration: string;
-  expirations: ExpiryOption[];
-  underlying_price: number | null;
-  smile: SmilePoint[];
-  score: ExpiryScoreRow | null;
-  commentary: Commentary | null;
-  neighbors: (ExpiryScoreRow & { position: string })[];
 }
 
 export interface IVRank {
@@ -373,9 +355,6 @@ export const api = {
       dte_min: dteMin,
       dte_max: dteMax,
     }),
-
-  expiry: (symbol: string, expiration?: string) =>
-    apiGet<ExpiryResponse>(`/api/expiry/${symbol}`, { expiration }),
 
   recommendStrategy: (symbol: string, params: RecommendQueryParams) =>
     apiGet<RecommendResponse>(`/api/strategy/${symbol}/recommend`, { ...params }),

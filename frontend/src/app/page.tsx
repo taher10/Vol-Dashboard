@@ -64,8 +64,8 @@ export default function OverviewPage() {
     };
   }, [symbols, dteRange, refreshNonce]);
 
-  const handlePointClick = (expiration: string, symbol: string) => {
-    router.push(`/expiry/${symbol}?expiration=${encodeURIComponent(expiration)}`);
+  const handlePointClick = (_expiration: string, symbol: string) => {
+    router.push(`/strategy/${symbol}`);
   };
 
   type AnyMetricPoint = TermStructurePoint | SkewPoint | CurvaturePoint | VrpPoint;

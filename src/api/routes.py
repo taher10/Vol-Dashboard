@@ -30,7 +30,7 @@ from src.schwab_database import SchwabDatabase
 from src.symbols import SYMBOL_REGISTRY
 
 from .schemas import SymbolOut
-from .serialize import clean_value, df_records, series_record
+from .serialize import clean_value, df_records
 
 router = APIRouter(prefix="/api")
 
@@ -89,11 +89,6 @@ def _parse_date(value: str, label: str = "date") -> "pd.Timestamp":
         return pd.Timestamp(value)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"Invalid {label} '{value}'.") from exc
-
-
-def _match_expiration(df: pd.DataFrame, expiration: str, col: str = "expiration") -> pd.DataFrame:
-    target = _parse_date(expiration, label="expiration date").date()
-    return df[df[col].dt.date == target]
 
 
 def _underlying_price(chain: pd.DataFrame | None) -> float | None:
@@ -317,76 +312,6 @@ def overview(
         "expiry_scores": df_records(expiry_scores) if expiry_scores is not None else [],
         "takeaway": takeaway,
         "commentary": commentary,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Expiry drilldown
-# ---------------------------------------------------------------------------
-
-
-@router.get("/expiry/{symbol}")
-def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
-    symbol = symbol.upper()
-    bundle = _load_bundle(symbol)
-    chain = bundle.chain
-    if chain is None or chain.empty or "expiration" not in chain.columns:
-        raise HTTPException(status_code=404, detail=f"No option chain data for '{symbol}'.")
-
-    expirations = _expirations_list(chain)
-    if not expirations:
-        raise HTTPException(status_code=404, detail=f"No expirations found for '{symbol}'.")
-
-    if expiration is None:
-        expiration = expirations[0]["expiration"]
-    else:
-        # Normalize whatever date format the caller passed (e.g. a plain
-        # "YYYY-MM-DD" from Trade Ideas'/Backtest's deep links, vs. the full
-        # ISO-with-time strings _expirations_list() produces) to the exact
-        # string already used in `expirations`, so the returned "expiration"
-        # field always matches one of expirations[].expiration -- otherwise
-        # the frontend's <Select value={data.expiration}> can't find a
-        # matching item and renders blank even though the right data loaded.
-        target_date = _parse_date(expiration, label="expiration date").date()
-        matched = next((e for e in expirations if pd.Timestamp(e["expiration"]).date() == target_date), None)
-        if matched is None:
-            raise HTTPException(status_code=404, detail=f"No expiration '{expiration}' found for '{symbol}'.")
-        expiration = matched["expiration"]
-
-    expiry_chain = _match_expiration(chain, expiration)
-    smile_cols = [c for c in ("optionType", "delta", "impliedVolatility", "strikePrice") if c in expiry_chain.columns]
-    smile = df_records(expiry_chain[smile_cols].dropna(subset=["delta", "impliedVolatility"]))
-
-    score_row = None
-    commentary = None
-    neighbors: list[dict] = []
-    try:
-        expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
-    except ValueError:
-        expiry_scores = None
-
-    if expiry_scores is not None and not expiry_scores.empty:
-        target_date = _parse_date(expiration, label="expiration date").date()
-        match_idx = expiry_scores.index[expiry_scores["expiration"].dt.date == target_date].tolist()
-        if match_idx:
-            idx = match_idx[0]
-            score_row = series_record(expiry_scores.iloc[idx])
-            commentary = _commentary_record(insights.expiry_commentary(chain, expiry_scores.iloc[idx]))
-            if idx > 0:
-                neighbors.append({"position": "previous", **series_record(expiry_scores.iloc[idx - 1])})
-            neighbors.append({"position": "selected", **series_record(expiry_scores.iloc[idx])})
-            if idx < len(expiry_scores) - 1:
-                neighbors.append({"position": "next", **series_record(expiry_scores.iloc[idx + 1])})
-
-    return {
-        "symbol": symbol,
-        "expiration": expiration,
-        "expirations": expirations,
-        "underlying_price": _underlying_price(expiry_chain),
-        "smile": smile,
-        "score": score_row,
-        "commentary": commentary,
-        "neighbors": neighbors,
     }
 
 

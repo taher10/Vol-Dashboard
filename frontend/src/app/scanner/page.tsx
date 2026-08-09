@@ -93,7 +93,7 @@ export default function ScannerPage() {
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
         <p className="mb-4 text-xs text-muted-foreground">
           One representative (~30 DTE) expiry per symbol, sortable -- click a column header to sort, click a row to
-          open its Expiry Drilldown. Symbols with little recorded history show blanks where a signal needs more days
+          open its Strategy Builder. Symbols with little recorded history show blanks where a signal needs more days
           to compute (see the History column), not zeros.
         </p>
 
@@ -138,7 +138,7 @@ export default function ScannerPage() {
                     <TableRow
                       key={row.symbol}
                       className="cursor-pointer"
-                      onClick={() => router.push(`/expiry/${row.symbol}`)}
+                      onClick={() => router.push(`/strategy/${row.symbol}`)}
                     >
                       <TableCell className="sticky left-0 z-10 bg-card font-medium">
                         <span className="inline-flex items-center gap-2">

@@ -110,8 +110,7 @@ export default function TradeIdeasPage() {
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
         <p className="mb-4 text-xs text-muted-foreground">
           One real example trade per symbol with a clear directional skew edge today -- same math Strategy Builder
-          and Expiry Drilldown use, not a separate estimate. Symbols with a balanced smile (no clear edge) don't
-          appear here.
+          uses, not a separate estimate. Symbols with a balanced smile (no clear edge) don't appear here.
         </p>
 
         <div className="mb-4 flex flex-wrap items-center gap-6 rounded-lg border border-border bg-card p-4">
@@ -216,7 +215,7 @@ export default function TradeIdeasPage() {
                     <TableRow
                       key={idea.symbol}
                       className="cursor-pointer"
-                      onClick={() => router.push(`/expiry/${idea.symbol}?expiration=${idea.expiration}`)}
+                      onClick={() => router.push(`/strategy/${idea.symbol}`)}
                     >
                       <TableCell className="sticky left-0 z-10 bg-card font-medium">
                         <span className="inline-flex items-center gap-2">
