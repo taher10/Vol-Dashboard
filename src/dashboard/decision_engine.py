@@ -43,14 +43,31 @@ def _label_from_z(z: pd.Series, high: str, low: str, mid: str, threshold: float 
     return pd.Series(values, index=z.index)
 
 
-def score_expiries(metrics: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def score_expiries(
+    metrics: dict[str, pd.DataFrame], iv_zscore_by_dte: dict[int, dict] | None = None
+) -> pd.DataFrame:
     """
     Merge VolatilityMetrics.compute_all() output into one row per expiry with
     decision-ready labels layered on top of the raw numbers.
 
     - vrp_z: how rich/cheap this expiry's IV is vs its own realized vol,
-      standardized across expiries so "rich" means rich *relative to the
-      other expiries on offer*, not to some fixed constant.
+      standardized across expiries. Needs price history at snapshot time
+      (job.py stopped collecting it to save API calls), so this is usually
+      NaN for current data -- kept around for symbols/history that do have
+      it, and still drives the VRP chart.
+    - iv_z: how rich/cheap this expiry's ATM IV is vs *its own trailing
+      history at that DTE* (HistoryStore.atm_iv_zscore_by_dte) -- doesn't
+      need price history at all, just the daily metric_history accumulation
+      the pipeline already does. This is the primary richness signal now
+      that vrp_z is usually unavailable; pass `iv_zscore_by_dte` (looked up
+      by the caller, since it needs DB access this pure function doesn't
+      otherwise have) to enable it.
+    - richness_z / richness_basis: richness_z coalesces iv_z (preferred)
+      and vrp_z into whichever signal actually produced richness_label;
+      richness_basis records which one ("iv_history" / "vrp" / None) so
+      callers can phrase commentary correctly ("vs. its own historical IV
+      range" vs. "vs. its own realized vol") instead of always claiming the
+      realized-vol framing even when that's not what was actually computed.
     - richness_label / skew_bias: the z-scores collapsed to a glance-able
       Rich/Cheap/Neutral and Puts-richer/Calls-richer/Balanced tag using the
       same +/-0.5 threshold in both cases (skew_bias uses skew's sign
@@ -96,7 +113,18 @@ def score_expiries(metrics: dict[str, pd.DataFrame]) -> pd.DataFrame:
         df["vrp"] = np.nan
 
     df["vrp_z"] = _zscore(df["vrp"])
-    df["richness_label"] = _label_from_z(df["vrp_z"], "Rich", "Cheap", "Neutral")
+
+    if iv_zscore_by_dte:
+        df["iv_z"] = df["dte"].map(lambda d: iv_zscore_by_dte.get(int(d), {}).get("zscore"))
+        df["iv_z"] = pd.to_numeric(df["iv_z"], errors="coerce")
+    else:
+        df["iv_z"] = np.nan
+
+    df["richness_z"] = df["iv_z"].where(df["iv_z"].notna(), df["vrp_z"])
+    df["richness_basis"] = np.select(
+        [df["iv_z"].notna(), df["vrp_z"].notna()], ["iv_history", "vrp"], default=None
+    )
+    df["richness_label"] = _label_from_z(df["richness_z"], "Rich", "Cheap", "Neutral")
 
     skew_z = _zscore(df["skew"])
     df["skew_bias"] = _label_from_z(skew_z, "Puts richer", "Calls richer", "Balanced")
@@ -115,53 +143,58 @@ def build_takeaway(
     One-sentence synthesis of score_expiries() output -- turns the 4-chart
     Overview grid + richness table into an instant answer instead of
     something the user has to read off manually. Picks the single most
-    statistically notable expiry (highest |vrp_z|, i.e. furthest from
+    statistically notable expiry (highest |richness_z|, i.e. furthest from
     "typical" for this symbol's own curve) and reports its richness and
     skew tilt.
 
-    Deliberately says "vs. its own realized vol" rather than just "richest"
-    -- VRP richness and absolute IV level are different things (a name can
-    have much lower raw IV than another and still show a bigger gap vs. its
-    own realized vol), and a bare "richest in basket" claim sitting right
-    next to a chart where a different symbol is visibly higher reads as
-    wrong even though it's answering a different question. Confirmed this
-    was a real point of confusion, not just a hypothetical one.
+    Deliberately says "vs. its own {basis}" rather than just "richest" --
+    richness and absolute IV level are different things (a name can have
+    much lower raw IV than another and still show a bigger gap vs. its own
+    baseline), and a bare "richest in basket" claim sitting right next to a
+    chart where a different symbol is visibly higher reads as wrong even
+    though it's answering a different question. Confirmed this was a real
+    point of confusion, not just a hypothetical one. The basis itself
+    (historical IV range vs. realized vol) varies by row -- richness_basis
+    records which one score_expiries() actually used -- since claiming
+    "vs. realized vol" when the number was actually computed from trailing
+    IV history would be its own kind of wrong.
 
     basket_ranks, if given, is one comparable number per symbol currently
     selected in the sidebar (each symbol's own most-notable *signed*
-    vrp_z) -- the cross-symbol clause is only appended when there's more
-    than one symbol to actually compare against.
+    richness_z) -- the cross-symbol clause is only appended when there's
+    more than one symbol to actually compare against.
     """
     if expiry_scores is None or expiry_scores.empty:
         return f"{symbol}: no expiry data available yet."
 
-    valid = expiry_scores.dropna(subset=["vrp_z"])
+    valid = expiry_scores.dropna(subset=["richness_z"])
     if valid.empty:
-        return f"{symbol}: VRP not available for this snapshot (needs price history at save time)."
+        return f"{symbol}: not enough history yet to size up richness for this snapshot."
 
-    notable = valid.loc[valid["vrp_z"].abs().idxmax()]
+    notable = valid.loc[valid["richness_z"].abs().idxmax()]
     dte = int(notable["dte"])
     expiration = pd.Timestamp(notable["expiration"]).strftime("%b %d")
-    vrp_z = float(notable["vrp_z"])
+    richness_z = float(notable["richness_z"])
     skew_bias = str(notable["skew_bias"]).lower()
+    basis = "realized vol" if notable.get("richness_basis") == "vrp" else "historical IV range"
 
-    if abs(vrp_z) < _Z_THRESHOLD:
-        sentence = f"{symbol}: VRP is roughly flat across the curve (max |z|={abs(vrp_z):.1f}) — no expiry stands out as notably rich or cheap vs. its own realized vol."
+    if abs(richness_z) < _Z_THRESHOLD:
+        sentence = f"{symbol}: IV is roughly flat across the curve (max |z|={abs(richness_z):.1f}) — no expiry stands out as notably rich or cheap vs. its own {basis}."
     else:
         richness = str(notable["richness_label"]).lower()
         sentence = (
-            f"{symbol} {expiration} ({dte}d) is {richness} vs. its own realized vol "
-            f"(VRP z={vrp_z:+.1f}), with a {skew_bias} skew tilt."
+            f"{symbol} {expiration} ({dte}d) is {richness} vs. its own {basis} "
+            f"(z={richness_z:+.1f}), with a {skew_bias} skew tilt."
         )
 
     if basket_ranks and len(basket_ranks) > 1 and symbol in basket_ranks:
         ordered = sorted(basket_ranks.items(), key=lambda kv: kv[1], reverse=True)
         rank = next(i for i, (sym, _) in enumerate(ordered, start=1) if sym == symbol)
         if rank == 1:
-            sentence += f" Widest IV-vs-RV gap in the {len(basket_ranks)}-symbol basket (not the same as highest raw IV)."
+            sentence += f" Widest richness gap in the {len(basket_ranks)}-symbol basket (not the same as highest raw IV)."
         elif rank == len(basket_ranks):
-            sentence += f" Narrowest IV-vs-RV gap in the {len(basket_ranks)}-symbol basket."
+            sentence += f" Narrowest richness gap in the {len(basket_ranks)}-symbol basket."
         else:
-            sentence += f" Ranks {rank}/{len(basket_ranks)} for IV-vs-RV richness in the selected basket."
+            sentence += f" Ranks {rank}/{len(basket_ranks)} for richness in the selected basket."
 
     return sentence

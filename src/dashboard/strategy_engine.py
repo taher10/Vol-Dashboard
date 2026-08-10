@@ -256,6 +256,112 @@ def build_vertical(
     )
 
 
+def build_cash_secured_put(chain: pd.DataFrame, expiration: pd.Timestamp, target_delta: float = 0.30) -> Candidate | None:
+    """
+    Sell one cash-secured put near `target_delta` -- undefined risk down to
+    zero (secured by cash, not a bought wing), for a trader who's genuinely
+    happy to own the stock at the strike, not just collecting premium with a
+    hard stop. Closed-form P/L (no _summarize() curve-sampling needed -- a
+    single leg's expiration payoff is linear past the strike, no benefit to
+    sampling it): max_profit is the premium collected outright; max_loss is
+    conventionally quoted as strike-premium (the capital at risk, i.e. the
+    worst case if assigned and the stock went to zero); breakeven is
+    strike-premium. Returns None if the chain can't support a put near
+    target_delta, or the degenerate case where premium >= strike.
+    """
+    exp_chain = chain[chain["expiration"] == expiration].dropna(subset=["delta", "bid", "ask", "strikePrice"])
+    if exp_chain.empty:
+        return None
+    primary = _nearest_to_delta(exp_chain, "PUT", target_delta)
+    if primary is None:
+        return None
+
+    strike = float(primary["strikePrice"])
+    premium = _mid(primary)
+    max_loss = strike - premium
+    if max_loss <= 0:
+        return None
+
+    leg = Leg("sell", "PUT", strike, float(primary["delta"]), premium)
+    breakeven = strike - premium
+    return Candidate(
+        structure="Cash Secured Put",
+        direction="bullish",
+        expiration=expiration,
+        dte=int(exp_chain["dte"].iloc[0]),
+        legs=[leg],
+        net_debit_credit=-premium,
+        max_profit=premium,
+        max_loss=max_loss,
+        breakevens=[breakeven],
+        approx_pop=_approx_pop(exp_chain, [leg], [breakeven], is_credit=True),
+        payoff=[],
+    )
+
+
+def build_covered_call(
+    chain: pd.DataFrame, expiration: pd.Timestamp, underlying_price: float, target_delta: float = 0.30
+) -> Candidate | None:
+    """
+    Sell one call near `target_delta` against 100 owned shares -- for a
+    trader who's already long the stock (or willing to be) and thinks a big
+    further rally is unlikely before this expiration. Same closed-form
+    reasoning as build_cash_secured_put(): max_profit is the gap up to the
+    strike plus premium (if called away); max_loss is stock_price-premium
+    (conventional quoting, worst case the stock goes to zero); breakeven is
+    stock_price-premium. `net_debit_credit` is the option premium only, not
+    the stock's own cost basis -- matches how the rest of the app already
+    keeps "what did the option leg cost" separate from position sizing.
+    Returns None if the chain can't support a call near target_delta, or a
+    degenerate case (e.g. the selected call is already at/below the current
+    price -- not a sane "sell into a rally" setup).
+    """
+    if underlying_price is None or underlying_price <= 0:
+        return None
+    exp_chain = chain[chain["expiration"] == expiration].dropna(subset=["delta", "bid", "ask", "strikePrice"])
+    if exp_chain.empty:
+        return None
+    primary = _nearest_to_delta(exp_chain, "CALL", target_delta)
+    if primary is None:
+        return None
+
+    strike = float(primary["strikePrice"])
+    premium = _mid(primary)
+    max_profit = (strike - underlying_price) + premium
+    max_loss = underlying_price - premium
+    if max_profit <= 0 or max_loss <= 0:
+        return None
+
+    leg = Leg("sell", "CALL", strike, float(primary["delta"]), premium)
+    breakeven = underlying_price - premium
+    # NOT _approx_pop(): that shared helper's single-breakeven credit case
+    # always returns 1-d, which is only right when the structure's loss
+    # side matches what that leg's delta approximates (e.g. a bear call
+    # spread: CALL delta ~ P(above breakeven) = P(loss), so P(profit)=1-d).
+    # A covered call's profit direction is the *opposite* of a bear call
+    # spread's despite using the same CALL leg -- it loses BELOW breakeven
+    # (like a bull put spread), not above. CALL delta at the breakeven
+    # already approximates P(price > breakeven) directly, which here IS
+    # P(profit) -- using 1-d would silently invert this (confirmed by hand:
+    # a breakeven sitting below the current spot produced a sub-50% POP
+    # with 1-d, backwards from the obvious "already past breakeven" case).
+    delta_at_breakeven = _delta_at_price(exp_chain, "CALL", breakeven)
+    approx_pop = max(0.0, delta_at_breakeven) if delta_at_breakeven is not None else 0.0
+    return Candidate(
+        structure="Covered Call",
+        direction="bullish",
+        expiration=expiration,
+        dte=int(exp_chain["dte"].iloc[0]),
+        legs=[leg],
+        net_debit_credit=-premium,
+        max_profit=max_profit,
+        max_loss=max_loss,
+        breakevens=[breakeven],
+        approx_pop=approx_pop,
+        payoff=[],
+    )
+
+
 def rank_candidates(candidates: list[Candidate]) -> list[Candidate]:
     """Reward-per-unit-risk first (max_profit / max_loss, descending), ties broken by approx_pop descending."""
 

@@ -49,11 +49,3 @@ def df_records(df: pd.DataFrame | None) -> list[dict]:
         {k: clean_value(v) for k, v in row.items()}
         for row in df.to_dict(orient="records")
     ]
-
-
-def series_record(series: "pd.Series | dict | None") -> dict | None:
-    """Convert a single Series/dict (e.g. one scored-expiry row) into a JSON-safe dict."""
-    if series is None:
-        return None
-    items = series.items() if isinstance(series, pd.Series) else series.items()
-    return {k: clean_value(v) for k, v in items}

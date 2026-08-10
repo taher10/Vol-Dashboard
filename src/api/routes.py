@@ -16,20 +16,21 @@ exposed to other users, since it's a mutating, credential-backed action.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from src.data_quality import LiveDataUnavailableError
-from src.dashboard import data_loader, decision_engine, strategy_engine
+from src.dashboard import backtest_engine, data_loader, decision_engine, insights, strategy_engine
 from src.dashboard.data_loader import SnapshotBundle
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
 from src.symbols import SYMBOL_REGISTRY
 
 from .schemas import SymbolOut
-from .serialize import clean_value, df_records, series_record
+from .serialize import clean_value, df_records
 
 router = APIRouter(prefix="/api")
 
@@ -39,6 +40,20 @@ _METRIC_NAMES = ("term_structure", "skew", "skew_ratio", "curvature", "vrp")
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+_history_store = HistoryStore()
+
+
+def _iv_zscore_lookup(symbol: str, metrics: dict[str, pd.DataFrame]) -> dict[int, dict]:
+    """Trailing IV z-score per dte currently on the chain, for score_expiries()'s
+    richness signal -- computed here (not inside score_expiries itself) since it
+    needs DB access that function deliberately doesn't have."""
+    ts = metrics.get("term_structure")
+    if ts is None or ts.empty or "dte" not in ts.columns:
+        return {}
+    dtes = [int(d) for d in ts["dte"].dropna().unique()]
+    return _history_store.atm_iv_zscore_by_dte(symbol, dtes)
 
 
 def _load_bundle(symbol: str) -> SnapshotBundle:
@@ -76,9 +91,15 @@ def _parse_date(value: str, label: str = "date") -> "pd.Timestamp":
         raise HTTPException(status_code=400, detail=f"Invalid {label} '{value}'.") from exc
 
 
-def _match_expiration(df: pd.DataFrame, expiration: str, col: str = "expiration") -> pd.DataFrame:
-    target = _parse_date(expiration, label="expiration date").date()
-    return df[df[col].dt.date == target]
+def _underlying_price(chain: pd.DataFrame | None) -> float | None:
+    """Most recent underlyingPrice quoted anywhere in the chain (same value
+    repeated per-contract, so any non-null row works) -- lets the UI show a
+    trader the actual spot/underlying price, which nothing currently
+    surfaces despite it being on every row of the chain already."""
+    if chain is None or chain.empty or "underlyingPrice" not in chain.columns:
+        return None
+    values = chain["underlyingPrice"].dropna()
+    return float(values.iloc[0]) if not values.empty else None
 
 
 def _expirations_list(chain: pd.DataFrame) -> list[dict]:
@@ -102,6 +123,98 @@ def _expirations_list(chain: pd.DataFrame) -> list[dict]:
 @router.get("/symbols", response_model=list[SymbolOut])
 def list_symbols() -> list[SymbolOut]:
     return [SymbolOut(symbol=sym, color=info.color) for sym, info in SYMBOL_REGISTRY.items()]
+
+
+# ---------------------------------------------------------------------------
+# Scanner — one row per registry symbol, moontower-style sortable table.
+# Unlike /api/overview (scoped to user-selected symbols), this loops over
+# every symbol in SYMBOL_REGISTRY unconditionally: ~20 symbols x (1 disk
+# read + up to 3 SQLite queries each opening/closing their own connection,
+# no pooling) per request. Real but small at this scale (same N-symbol-loop
+# pattern /api/overview's basket_ranks computation already uses) -- not
+# worth a batching layer for an on-demand, unpolled, ~20-row endpoint. The
+# first cheap fix if this ever matters is a short server-side cache (data
+# only changes once/day), not a DB-layer rewrite.
+# ---------------------------------------------------------------------------
+
+
+def _scanner_row(symbol: str, target_dte: int) -> dict:
+    """One representative-expiry row for `symbol` -- the closest-to-
+    target_dte row from score_expiries(), so every field in the row shares
+    one DTE (consistent with iv_rank/atm_iv_zscore_by_dte's own constant-DTE
+    convention, rather than each column picking its own independently-
+    relevant expiry). Never raises for a missing/thin-history symbol --
+    returns a row with nulls in the history-dependent fields instead, since
+    a scanner request must never fail because one of 20 symbols has no
+    snapshot yet (same "report gaps, don't hide them" spirit as /api/
+    overview's missing_symbols list)."""
+    info = SYMBOL_REGISTRY[symbol]
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return {
+            "symbol": symbol,
+            "color": info.color,
+            "underlying_price": None,
+            "as_of": None,
+            "dte": None,
+            "expiration": None,
+            "atm_iv": None,
+            "skew": None,
+            "skew_bias": None,
+            "curvature": None,
+            "richness_z": None,
+            "richness_label": None,
+            "richness_basis": None,
+            "iv_rank": None,
+            "iv_percentile": None,
+            "days_of_history": 0,
+        }
+
+    try:
+        expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
+    except ValueError:
+        expiry_scores = None
+
+    row = None
+    if expiry_scores is not None and not expiry_scores.empty:
+        idx = (expiry_scores["dte"] - target_dte).abs().idxmin()
+        row = expiry_scores.loc[idx]
+
+    ivr = _history_store.iv_rank(symbol, target_dte=target_dte)
+    # Deliberately HistoryStore.snapshot_dates(), not SchwabDatabase.
+    # options_snapshot_dates() -- iv_rank/richness_z are computed from
+    # HistoryStore's metric_history table, which can accumulate a different
+    # number of days than the raw options table (confirmed in practice: two
+    # symbols can show the same raw-snapshot count while one has an extra
+    # metric_history row from an earlier backfill). Showing the raw-table
+    # count here would silently misexplain why iv_rank/richness_z are null
+    # for one symbol but not another with the same displayed "History" value.
+    days_of_history = len(_history_store.snapshot_dates(symbol))
+
+    return {
+        "symbol": symbol,
+        "color": info.color,
+        "underlying_price": _underlying_price(bundle.chain),
+        "as_of": bundle.as_of.isoformat(),
+        "dte": clean_value(row["dte"]) if row is not None else None,
+        "expiration": clean_value(row["expiration"]) if row is not None else None,
+        "atm_iv": clean_value(row["atm_iv"]) if row is not None else None,
+        "skew": clean_value(row["skew"]) if row is not None else None,
+        "skew_bias": clean_value(row["skew_bias"]) if row is not None else None,
+        "curvature": clean_value(row["curvature"]) if row is not None else None,
+        "richness_z": clean_value(row["richness_z"]) if row is not None else None,
+        "richness_label": clean_value(row["richness_label"]) if row is not None else None,
+        "richness_basis": clean_value(row["richness_basis"]) if row is not None else None,
+        "iv_rank": clean_value(ivr["iv_rank"]) if ivr else None,
+        "iv_percentile": clean_value(ivr["iv_percentile"]) if ivr else None,
+        "days_of_history": days_of_history,
+    }
+
+
+@router.get("/scanner")
+def scanner(target_dte: int = Query(30, ge=0, le=3650)) -> dict:
+    return {"target_dte": target_dte, "rows": [_scanner_row(sym, target_dte) for sym in SYMBOL_REGISTRY]}
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +256,7 @@ def overview(
     for sym, metrics in filtered_metrics.items():
         payload_symbols[sym] = {
             "color": SYMBOL_REGISTRY[sym].color,
+            "underlying_price": _underlying_price(bundles[sym].chain),
             "term_structure": df_records(metrics.get("term_structure")),
             "skew": df_records(metrics.get("skew")),
             "curvature": df_records(metrics.get("curvature")),
@@ -152,7 +266,9 @@ def overview(
     expiry_scores = None
     if primary in filtered_metrics and "term_structure" in filtered_metrics[primary]:
         try:
-            expiry_scores = decision_engine.score_expiries(filtered_metrics[primary])
+            expiry_scores = decision_engine.score_expiries(
+                filtered_metrics[primary], _iv_zscore_lookup(primary, filtered_metrics[primary])
+            )
         except ValueError:
             expiry_scores = None
 
@@ -160,16 +276,32 @@ def overview(
     if len(bundles) > 1:
         for sym, metrics in filtered_metrics.items():
             try:
-                scores = decision_engine.score_expiries(metrics)
+                scores = decision_engine.score_expiries(metrics, _iv_zscore_lookup(sym, metrics))
             except ValueError:
                 continue
-            valid = scores.dropna(subset=["vrp_z"])
+            valid = scores.dropna(subset=["richness_z"])
             if not valid.empty:
-                basket_ranks[sym] = float(valid.loc[valid["vrp_z"].abs().idxmax(), "vrp_z"])
+                basket_ranks[sym] = float(valid.loc[valid["richness_z"].abs().idxmax(), "richness_z"])
 
     takeaway = None
     if expiry_scores is not None:
         takeaway = decision_engine.build_takeaway(primary, expiry_scores, basket_ranks)
+
+    commentary = None
+    if expiry_scores is not None and not expiry_scores.empty:
+        # Prefer the most richness-notable expiry (same selection build_takeaway
+        # uses). Falls back to the most skewed expiry with real wing data when no
+        # richness signal is available at all (neither trailing IV history nor
+        # VRP) -- skew comes straight off the chain's own delta/IV surface, so
+        # it's always there even when richness isn't.
+        richness_valid = expiry_scores.dropna(subset=["richness_z"])
+        if not richness_valid.empty:
+            notable_row = expiry_scores.loc[richness_valid["richness_z"].abs().idxmax()]
+        else:
+            skew_valid = expiry_scores[expiry_scores["has_wing_data"]].dropna(subset=["skew"])
+            notable_row = expiry_scores.loc[skew_valid["skew"].abs().idxmax()] if not skew_valid.empty else None
+        if notable_row is not None:
+            commentary = _commentary_record(insights.expiry_commentary(bundles[primary].chain, notable_row))
 
     return {
         "primary": primary,
@@ -179,59 +311,7 @@ def overview(
         "symbols": payload_symbols,
         "expiry_scores": df_records(expiry_scores) if expiry_scores is not None else [],
         "takeaway": takeaway,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Expiry drilldown
-# ---------------------------------------------------------------------------
-
-
-@router.get("/expiry/{symbol}")
-def expiry_drilldown(symbol: str, expiration: str | None = Query(None)) -> dict:
-    symbol = symbol.upper()
-    bundle = _load_bundle(symbol)
-    chain = bundle.chain
-    if chain is None or chain.empty or "expiration" not in chain.columns:
-        raise HTTPException(status_code=404, detail=f"No option chain data for '{symbol}'.")
-
-    expirations = _expirations_list(chain)
-    if not expirations:
-        raise HTTPException(status_code=404, detail=f"No expirations found for '{symbol}'.")
-
-    if expiration is None:
-        expiration = expirations[0]["expiration"]
-
-    expiry_chain = _match_expiration(chain, expiration)
-    smile_cols = [c for c in ("optionType", "delta", "impliedVolatility", "strikePrice") if c in expiry_chain.columns]
-    smile = df_records(expiry_chain[smile_cols].dropna(subset=["delta", "impliedVolatility"]))
-
-    score_row = None
-    neighbors: list[dict] = []
-    try:
-        expiry_scores = decision_engine.score_expiries(bundle.metrics)
-    except ValueError:
-        expiry_scores = None
-
-    if expiry_scores is not None and not expiry_scores.empty:
-        target_date = _parse_date(expiration, label="expiration date").date()
-        match_idx = expiry_scores.index[expiry_scores["expiration"].dt.date == target_date].tolist()
-        if match_idx:
-            idx = match_idx[0]
-            score_row = series_record(expiry_scores.iloc[idx])
-            if idx > 0:
-                neighbors.append({"position": "previous", **series_record(expiry_scores.iloc[idx - 1])})
-            neighbors.append({"position": "selected", **series_record(expiry_scores.iloc[idx])})
-            if idx < len(expiry_scores) - 1:
-                neighbors.append({"position": "next", **series_record(expiry_scores.iloc[idx + 1])})
-
-    return {
-        "symbol": symbol,
-        "expiration": expiration,
-        "expirations": expirations,
-        "smile": smile,
-        "score": score_row,
-        "neighbors": neighbors,
+        "commentary": commentary,
     }
 
 
@@ -271,6 +351,15 @@ def _candidate_record(c: strategy_engine.Candidate) -> dict:
     }
 
 
+def _commentary_record(c: insights.Commentary) -> dict:
+    return {
+        "headline": c.headline,
+        "interpretation": c.interpretation,
+        "trade_angle": c.trade_angle,
+        "example_trade": _candidate_record(c.example_trade) if c.example_trade is not None else None,
+    }
+
+
 def _sizing_record(s: strategy_engine.PositionSizing) -> dict:
     return {
         "capital_available": clean_value(s.capital_available),
@@ -299,6 +388,19 @@ def recommend_strategy(
 
     rec = strategy_engine.recommend_trade(chain, direction=direction, timeline=timeline, risk=risk, capital=capital)
 
+    commentary = None
+    if rec is not None:
+        score_row = None
+        try:
+            expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
+        except ValueError:
+            expiry_scores = None
+        if expiry_scores is not None and not expiry_scores.empty:
+            match = expiry_scores[expiry_scores["expiration"].dt.date == pd.Timestamp(rec.candidate.expiration).date()]
+            if not match.empty:
+                score_row = match.iloc[0]
+        commentary = insights.recommendation_commentary(score_row, rec.candidate)
+
     return {
         "symbol": symbol,
         "direction": direction,
@@ -307,14 +409,121 @@ def recommend_strategy(
         "spot": _underlying_price(chain),
         "recommendation": _candidate_record(rec.candidate) if rec else None,
         "sizing": _sizing_record(rec.sizing) if rec and rec.sizing else None,
+        "commentary": commentary,
     }
+
+
+# ---------------------------------------------------------------------------
+# Trade Ideas — cross-symbol feed of real, actionable example trades
+# (src/dashboard/insights.py), moontower-style. Unlike /api/scanner (always
+# 20 rows, nulls for thin data), a symbol only appears here if it actually
+# has a directional edge -- expiry_commentary() returns example_trade=None
+# for a "Balanced" skew_bias, which correctly means no idea, not missing data.
+# ---------------------------------------------------------------------------
+
+
+_TRADE_IDEA_MAX_DTE = 60  # near-dated only -- see plan: far-dated expiries are illiquid/wide-spread
+                          # and not what a weekly-income-style feed should surface.
+_HIGH_CONVICTION_Z = 1.5  # meaningfully rich, not just barely (the plain "Rich" threshold is 0.5) --
+                          # only reach for an undefined-risk CSP/Covered Call at this conviction level.
+
+
+def _trade_idea(symbol: str) -> dict | None:
+    """One trade idea for `symbol`, built from the exact same "notable
+    expiry" selection and insights.expiry_commentary() call overview()'s
+    own commentary block already uses -- so an idea here is always
+    consistent with what that symbol's Expiry Drilldown would independently
+    show, never a second parallel calculation. Returns None (never raises)
+    when there's nothing to show: no snapshot yet, no scoreable expiries
+    within the DTE window, or the notable expiry's skew_bias is "Balanced"
+    at moderate conviction (expiry_commentary() itself returns
+    example_trade=None there -- expected, not an error).
+
+    At high conviction (richness_z >= _HIGH_CONVICTION_Z) on a "Rich"
+    expiry, prefers an undefined-risk Cash Secured Put or Covered Call over
+    the usual defined-risk vertical -- see strategy_engine.build_cash_secured_put()/
+    build_covered_call() docstrings for the payoff math, and the plan for
+    why this is gated on richness_z (the practically-available signal) even
+    though it doesn't strictly require richness_basis=="vrp" (real VRP data
+    is rarely available now that price history isn't collected)."""
+    info = SYMBOL_REGISTRY[symbol]
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return None
+
+    metrics = _filter_metrics_by_dte(bundle.metrics, 0, _TRADE_IDEA_MAX_DTE)
+    try:
+        expiry_scores = decision_engine.score_expiries(metrics, _iv_zscore_lookup(symbol, metrics))
+    except ValueError:
+        return None
+    if expiry_scores is None or expiry_scores.empty:
+        return None
+
+    richness_valid = expiry_scores.dropna(subset=["richness_z"])
+    if not richness_valid.empty:
+        notable_row = expiry_scores.loc[richness_valid["richness_z"].abs().idxmax()]
+    else:
+        skew_valid = expiry_scores[expiry_scores["has_wing_data"]].dropna(subset=["skew"])
+        if skew_valid.empty:
+            return None
+        notable_row = expiry_scores.loc[skew_valid["skew"].abs().idxmax()]
+
+    commentary = insights.expiry_commentary(bundle.chain, notable_row)
+
+    richness_z = notable_row.get("richness_z")
+    richness_z = float(richness_z) if richness_z is not None and pd.notna(richness_z) else None
+    high_conviction = richness_z is not None and richness_z >= _HIGH_CONVICTION_Z
+    skew_bias = str(notable_row["skew_bias"])
+    expiration = notable_row["expiration"]
+
+    trade = None
+    if high_conviction and notable_row["richness_label"] == "Rich":
+        if skew_bias in ("Puts richer", "Balanced"):
+            trade = strategy_engine.build_cash_secured_put(bundle.chain, expiration)
+        elif skew_bias == "Calls richer":
+            trade = strategy_engine.build_covered_call(bundle.chain, expiration, _underlying_price(bundle.chain))
+    if trade is None:
+        trade = commentary.example_trade
+    if trade is None:
+        return None  # Balanced skew_bias at moderate conviction -- no directional edge, correctly no idea here.
+
+    reward_risk = clean_value(trade.max_profit / trade.max_loss) if trade.max_loss > 0 else None
+
+    return {
+        "symbol": symbol,
+        "color": info.color,
+        "underlying_price": _underlying_price(bundle.chain),
+        "as_of": bundle.as_of.isoformat(),
+        "headline": commentary.headline,
+        "structure": trade.structure,
+        "direction": trade.direction,
+        "is_credit": trade.net_debit_credit < 0,
+        "expiration": pd.Timestamp(trade.expiration).date().isoformat(),
+        "dte": trade.dte,
+        "legs": [_leg_record(leg) for leg in trade.legs],
+        "net_debit_credit": clean_value(trade.net_debit_credit),
+        "max_profit": clean_value(trade.max_profit),
+        "max_loss": clean_value(trade.max_loss),
+        "reward_risk": reward_risk,
+        "approx_pop": clean_value(trade.approx_pop),
+        "breakevens": [clean_value(b) for b in trade.breakevens],
+        "richness_label": clean_value(notable_row["richness_label"]),
+        "richness_z": clean_value(notable_row["richness_z"]),
+        "richness_basis": clean_value(notable_row["richness_basis"]),
+        "skew_bias": clean_value(notable_row["skew_bias"]),
+        "skew": clean_value(notable_row["skew"]),
+    }
+
+
+@router.get("/trade-ideas")
+def trade_ideas() -> dict:
+    return {"ideas": [idea for sym in SYMBOL_REGISTRY if (idea := _trade_idea(sym)) is not None]}
 
 
 # ---------------------------------------------------------------------------
 # History (IV Rank / trailing z-score) — bonus stat-tile data
 # ---------------------------------------------------------------------------
-
-_history_store = HistoryStore()
 
 
 @router.get("/history/{symbol}/iv-rank")
@@ -455,3 +664,102 @@ def contract_history(symbol: str, contract_symbol: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
     df = _schwab_db.contract_history(symbol, contract_symbol)
     return {"symbol": symbol, "contract_symbol": contract_symbol, "history": df_records(df)}
+
+
+# ---------------------------------------------------------------------------
+# Backtest — historical trade simulator (src/dashboard/backtest_engine.py).
+# Entry-date options reuse /history/{symbol}/options-snapshot-dates above --
+# no separate "dates" endpoint needed, same accumulated SchwabDatabase data.
+# ---------------------------------------------------------------------------
+
+
+def _equity_point_record(p: backtest_engine.EquityPoint) -> dict:
+    return {
+        "date": p.date.isoformat(),
+        "dte_remaining": p.dte_remaining,
+        "pnl_per_share": clean_value(p.pnl_per_share),
+        "underlying_price": clean_value(p.underlying_price),
+    }
+
+
+def _backtest_result_record(r: backtest_engine.BacktestResult) -> dict:
+    return {
+        "entry_date": r.entry_date.isoformat(),
+        "entry_candidate": _candidate_record(r.entry_candidate),
+        "equity_curve": [_equity_point_record(p) for p in r.equity_curve],
+        "status": r.status,
+        "final_pnl_per_share": clean_value(r.final_pnl_per_share),
+        "days_held": r.days_held,
+        "summary": r.summary,
+    }
+
+
+def _history_snapshots(symbol: str, since: date) -> dict[date, pd.DataFrame]:
+    """Every recorded raw option-chain snapshot for `symbol` strictly after
+    `since`, adapted to the camelCase schema build_vertical() expects --
+    shared by the /expirations and /run backtest endpoints below."""
+    snapshots: dict[date, pd.DataFrame] = {}
+    for d in _schwab_db.options_snapshot_dates(symbol):
+        if d > since:
+            snapshots[d] = backtest_engine.adapt_historical_chain(_schwab_db.options_snapshot(symbol, d))
+    return snapshots
+
+
+@router.get("/backtest/{symbol}/expirations")
+def backtest_expirations(symbol: str, entry_date: str = Query(..., description="ISO date")) -> dict:
+    symbol = symbol.upper()
+    if symbol not in SYMBOL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
+    parsed = _parse_date(entry_date, label="entry date").date()
+    raw = _schwab_db.options_snapshot(symbol, parsed)
+    if raw.empty:
+        raise HTTPException(status_code=404, detail=f"No recorded option chain for '{symbol}' on {entry_date}.")
+    chain = backtest_engine.adapt_historical_chain(raw)
+    return {"symbol": symbol, "entry_date": entry_date, "expirations": _expirations_list(chain)}
+
+
+@router.get("/backtest/{symbol}/run")
+def backtest_run(
+    symbol: str,
+    entry_date: str = Query(..., description="ISO date, must be a recorded snapshot date"),
+    expiration: str = Query(..., description="ISO date"),
+    direction: Literal["bullish", "bearish"] = Query(...),
+    risk: Literal["conservative", "moderate", "aggressive"] = Query(...),
+) -> dict:
+    symbol = symbol.upper()
+    if symbol not in SYMBOL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
+    entry_parsed = _parse_date(entry_date, label="entry date").date()
+    expiration_parsed = _parse_date(expiration, label="expiration date")
+
+    raw_entry = _schwab_db.options_snapshot(symbol, entry_parsed)
+    if raw_entry.empty:
+        raise HTTPException(status_code=404, detail=f"No recorded option chain for '{symbol}' on {entry_date}.")
+    entry_chain = backtest_engine.adapt_historical_chain(raw_entry)
+
+    snapshots = _history_snapshots(symbol, entry_parsed)
+    result = backtest_engine.run_backtest(entry_parsed, entry_chain, snapshots, expiration_parsed, direction, risk)
+
+    if result is None:
+        return {
+            "symbol": symbol,
+            "entry_date": entry_date,
+            "expiration": expiration,
+            "direction": direction,
+            "risk": risk,
+            "result": None,
+            "error": (
+                f"Couldn't build a {risk} {direction} spread for {symbol} on {entry_date} at this expiration -- "
+                "try a different date, expiration, or risk profile."
+            ),
+        }
+
+    return {
+        "symbol": symbol,
+        "entry_date": entry_date,
+        "expiration": expiration,
+        "direction": direction,
+        "risk": risk,
+        "result": _backtest_result_record(result),
+        "error": None,
+    }

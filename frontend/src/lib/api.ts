@@ -99,6 +99,9 @@ export interface ExpiryScoreRow {
   realized_vol?: number | null;
   vrp: number | null;
   vrp_z: number | null;
+  iv_z: number | null;
+  richness_z: number | null;
+  richness_basis: "iv_history" | "vrp" | null;
   richness_label: string;
   skew_bias: string;
   has_wing_data: boolean;
@@ -106,10 +109,19 @@ export interface ExpiryScoreRow {
 
 export interface SymbolOverview {
   color: string;
+  underlying_price: number | null;
   term_structure: TermStructurePoint[];
   skew: SkewPoint[];
   curvature: CurvaturePoint[];
   vrp: VrpPoint[] | null;
+}
+
+/** example_trade mirrors StrategyCandidate (declared below) -- same shape, reused rather than duplicated. */
+export interface Commentary {
+  headline: string;
+  interpretation: string;
+  trade_angle: string;
+  example_trade: StrategyCandidate | null;
 }
 
 export interface OverviewResponse {
@@ -120,27 +132,12 @@ export interface OverviewResponse {
   symbols: Record<string, SymbolOverview>;
   expiry_scores: ExpiryScoreRow[];
   takeaway: string | null;
-}
-
-export interface SmilePoint {
-  optionType: "CALL" | "PUT";
-  delta: number;
-  impliedVolatility: number;
-  strikePrice: number;
+  commentary: Commentary | null;
 }
 
 export interface ExpiryOption {
   expiration: string;
   dte: number;
-}
-
-export interface ExpiryResponse {
-  symbol: string;
-  expiration: string;
-  expirations: ExpiryOption[];
-  smile: SmilePoint[];
-  score: ExpiryScoreRow | null;
-  neighbors: (ExpiryScoreRow & { position: string })[];
 }
 
 export interface IVRank {
@@ -205,6 +202,7 @@ export interface RecommendResponse {
   spot: number | null;
   recommendation: StrategyCandidate | null;
   sizing: PositionSizing | null;
+  commentary: string | null;
 }
 
 export interface RecommendQueryParams {
@@ -239,6 +237,112 @@ export interface PriceBar {
 }
 
 // ---------------------------------------------------------------------------
+// Scanner (cross-symbol snapshot table)
+// ---------------------------------------------------------------------------
+
+export interface ScannerRow {
+  symbol: string;
+  color: string;
+  underlying_price: number | null;
+  as_of: string | null;
+  dte: number | null;
+  expiration: string | null;
+  atm_iv: number | null;
+  skew: number | null;
+  skew_bias: string | null;
+  curvature: number | null;
+  richness_z: number | null;
+  richness_label: string | null;
+  richness_basis: "iv_history" | "vrp" | null;
+  iv_rank: number | null;
+  iv_percentile: number | null;
+  days_of_history: number;
+}
+
+export interface ScannerResponse {
+  target_dte: number;
+  rows: ScannerRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Trade Ideas (cross-symbol actionable trade feed)
+// ---------------------------------------------------------------------------
+
+export interface TradeIdea {
+  symbol: string;
+  color: string;
+  underlying_price: number | null;
+  as_of: string | null;
+  headline: string;
+  structure: string;
+  direction: "bullish" | "bearish";
+  is_credit: boolean;
+  expiration: string;
+  dte: number;
+  legs: StrategyLeg[];
+  net_debit_credit: number;
+  max_profit: number;
+  max_loss: number;
+  reward_risk: number | null;
+  approx_pop: number;
+  breakevens: number[];
+  richness_label: string | null;
+  richness_z: number | null;
+  richness_basis: "iv_history" | "vrp" | null;
+  skew_bias: string | null;
+  skew: number | null;
+}
+
+export interface TradeIdeasResponse {
+  ideas: TradeIdea[];
+}
+
+// ---------------------------------------------------------------------------
+// Backtest (historical trade simulator)
+// ---------------------------------------------------------------------------
+
+export interface BacktestExpirationsResponse {
+  symbol: string;
+  entry_date: string;
+  expirations: ExpiryOption[];
+}
+
+export interface EquityPoint {
+  date: string;
+  dte_remaining: number;
+  pnl_per_share: number;
+  underlying_price: number | null;
+}
+
+export interface BacktestResult {
+  entry_date: string;
+  entry_candidate: StrategyCandidate;
+  equity_curve: EquityPoint[];
+  status: "open" | "closed";
+  final_pnl_per_share: number;
+  days_held: number;
+  summary: string;
+}
+
+export interface BacktestRunResponse {
+  symbol: string;
+  entry_date: string;
+  expiration: string;
+  direction: "bullish" | "bearish";
+  risk: "conservative" | "moderate" | "aggressive";
+  result: BacktestResult | null;
+  /** Set (with `result: null`) when no vertical could be built for this date/expiration/direction/risk combination. */
+  error: string | null;
+}
+
+export interface BacktestRunParams {
+  entryDate: string;
+  expiration: string;
+  direction: "bullish" | "bearish";
+  risk: "conservative" | "moderate" | "aggressive";
+}
+
+// ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
 
@@ -252,16 +356,17 @@ export const api = {
       dte_max: dteMax,
     }),
 
-  expiry: (symbol: string, expiration?: string) =>
-    apiGet<ExpiryResponse>(`/api/expiry/${symbol}`, { expiration }),
-
   recommendStrategy: (symbol: string, params: RecommendQueryParams) =>
     apiGet<RecommendResponse>(`/api/strategy/${symbol}/recommend`, { ...params }),
 
   ivRank: (symbol: string) => apiGet<IVRank | null>(`/api/history/${symbol}/iv-rank`),
 
-  zscore: (symbol: string, metric: string) =>
-    apiGet<ZScore | null>(`/api/history/${symbol}/zscore`, { metric }),
+  zscore: (symbol: string, metric: string, targetDte?: number, lookbackDays?: number) =>
+    apiGet<ZScore | null>(`/api/history/${symbol}/zscore`, {
+      metric,
+      target_dte: targetDte,
+      lookback_days: lookbackDays,
+    }),
 
   priceSeries: (symbol: string, start?: string, end?: string) =>
     apiGet<{ symbol: string; prices: PriceBar[] }>(`/api/history/${symbol}/price-series`, { start, end }),
@@ -273,4 +378,22 @@ export const api = {
     ),
 
   refresh: (symbols: string[]) => apiPost<RefreshResponse>("/api/refresh", { symbols: symbols.join(",") }),
+
+  backtestDates: (symbol: string) =>
+    apiGet<{ symbol: string; dates: string[] }>(`/api/history/${symbol}/options-snapshot-dates`),
+
+  backtestExpirations: (symbol: string, entryDate: string) =>
+    apiGet<BacktestExpirationsResponse>(`/api/backtest/${symbol}/expirations`, { entry_date: entryDate }),
+
+  runBacktest: (symbol: string, params: BacktestRunParams) =>
+    apiGet<BacktestRunResponse>(`/api/backtest/${symbol}/run`, {
+      entry_date: params.entryDate,
+      expiration: params.expiration,
+      direction: params.direction,
+      risk: params.risk,
+    }),
+
+  scanner: (targetDte = 30) => apiGet<ScannerResponse>("/api/scanner", { target_dte: targetDte }),
+
+  tradeIdeas: () => apiGet<TradeIdeasResponse>("/api/trade-ideas"),
 };

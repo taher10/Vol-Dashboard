@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { SiteHeader } from "@/components/site-header";
 import { ChartCard } from "@/components/chart-card";
 import { ChartLegend, MetricLineChart, type MetricSeries } from "@/components/charts/metric-line-chart";
+import { InsightPanel } from "@/components/insight-panel";
 import { RichnessTable } from "@/components/richness-table";
 import { StatCard } from "@/components/stat-card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -63,8 +64,8 @@ export default function OverviewPage() {
     };
   }, [symbols, dteRange, refreshNonce]);
 
-  const handlePointClick = (expiration: string, symbol: string) => {
-    router.push(`/expiry/${symbol}?expiration=${encodeURIComponent(expiration)}`);
+  const handlePointClick = (_expiration: string, symbol: string) => {
+    router.push(`/strategy/${symbol}`);
   };
 
   type AnyMetricPoint = TermStructurePoint | SkewPoint | CurvaturePoint | VrpPoint;
@@ -103,7 +104,10 @@ export default function OverviewPage() {
             <Skeleton className="h-16 w-full max-w-2xl" />
           ) : (
             <>
-              {data?.takeaway && (
+              {/* InsightPanel below covers this same ground in more depth once commentary is
+                  available; only fall back to the plain one-liner when it isn't (e.g. no
+                  richness signal at all yet) so the two don't restate the same fact twice. */}
+              {data?.takeaway && !data?.commentary && (
                 <div className="flex-1 rounded-lg border border-border bg-accent/60 px-4 py-3 text-sm text-accent-foreground">
                   {data.takeaway}
                 </div>
@@ -120,9 +124,27 @@ export default function OverviewPage() {
         </div>
 
         {data && (
-          <p className="mb-4 text-xs text-muted-foreground">
-            As of {fmtDateTime(data.as_of)} · showing {dteRange[0]}–{dteRange[1]} DTE
-          </p>
+          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span>
+              As of {fmtDateTime(data.as_of)} · showing {dteRange[0]}–{dteRange[1]} DTE
+            </span>
+            <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              {Object.entries(data.symbols).map(([sym, info]) =>
+                info.underlying_price != null ? (
+                  <span key={sym} className="inline-flex items-center gap-1 font-mono tabular-nums">
+                    <span className="size-1.5 rounded-full" style={{ backgroundColor: info.color }} />
+                    {sym} ${fmtNum(info.underlying_price, 2)}
+                  </span>
+                ) : null
+              )}
+            </span>
+          </div>
+        )}
+
+        {data?.commentary && (
+          <div className="mb-4">
+            <InsightPanel commentary={data.commentary} symbol={data.primary} />
+          </div>
         )}
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
