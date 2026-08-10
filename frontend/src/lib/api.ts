@@ -250,6 +250,7 @@ export interface ScannerRow {
   atm_iv: number | null;
   skew: number | null;
   skew_bias: string | null;
+  has_wing_data: boolean;
   curvature: number | null;
   richness_z: number | null;
   richness_label: string | null;
@@ -274,6 +275,7 @@ export interface TradeIdea {
   underlying_price: number | null;
   as_of: string | null;
   headline: string;
+  reason: string;
   structure: string;
   direction: "bullish" | "bearish";
   is_credit: boolean;
@@ -291,6 +293,7 @@ export interface TradeIdea {
   richness_basis: "iv_history" | "vrp" | null;
   skew_bias: string | null;
   skew: number | null;
+  has_wing_data: boolean;
 }
 
 export interface TradeIdeasResponse {

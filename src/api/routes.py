@@ -162,6 +162,7 @@ def _scanner_row(symbol: str, target_dte: int) -> dict:
             "atm_iv": None,
             "skew": None,
             "skew_bias": None,
+            "has_wing_data": False,
             "curvature": None,
             "richness_z": None,
             "richness_label": None,
@@ -202,6 +203,7 @@ def _scanner_row(symbol: str, target_dte: int) -> dict:
         "atm_iv": clean_value(row["atm_iv"]) if row is not None else None,
         "skew": clean_value(row["skew"]) if row is not None else None,
         "skew_bias": clean_value(row["skew_bias"]) if row is not None else None,
+        "has_wing_data": bool(row["has_wing_data"]) if row is not None else False,
         "curvature": clean_value(row["curvature"]) if row is not None else None,
         "richness_z": clean_value(row["richness_z"]) if row is not None else None,
         "richness_label": clean_value(row["richness_label"]) if row is not None else None,
@@ -478,13 +480,17 @@ def _trade_idea(symbol: str) -> dict | None:
     expiration = notable_row["expiration"]
 
     trade = None
+    reason = None
     if high_conviction and notable_row["richness_label"] == "Rich":
         if skew_bias in ("Puts richer", "Balanced"):
             trade = strategy_engine.build_cash_secured_put(bundle.chain, expiration)
         elif skew_bias == "Calls richer":
             trade = strategy_engine.build_covered_call(bundle.chain, expiration, _underlying_price(bundle.chain))
+        if trade is not None:
+            reason = insights.high_conviction_trade_reason(trade, richness_z, notable_row["richness_basis"], skew_bias)
     if trade is None:
         trade = commentary.example_trade
+        reason = commentary.trade_angle
     if trade is None:
         return None  # Balanced skew_bias at moderate conviction -- no directional edge, correctly no idea here.
 
@@ -496,6 +502,7 @@ def _trade_idea(symbol: str) -> dict | None:
         "underlying_price": _underlying_price(bundle.chain),
         "as_of": bundle.as_of.isoformat(),
         "headline": commentary.headline,
+        "reason": reason,
         "structure": trade.structure,
         "direction": trade.direction,
         "is_credit": trade.net_debit_credit < 0,
@@ -513,6 +520,7 @@ def _trade_idea(symbol: str) -> dict | None:
         "richness_basis": clean_value(notable_row["richness_basis"]),
         "skew_bias": clean_value(notable_row["skew_bias"]),
         "skew": clean_value(notable_row["skew"]),
+        "has_wing_data": bool(notable_row["has_wing_data"]),
     }
 
 

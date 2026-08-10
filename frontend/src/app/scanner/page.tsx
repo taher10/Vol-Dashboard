@@ -5,12 +5,13 @@ import { useRouter } from "next/navigation";
 import { ArrowDown, ArrowUp } from "lucide-react";
 
 import { ChartCard } from "@/components/chart-card";
+import { InfoHint } from "@/components/info-hint";
 import { SiteHeader } from "@/components/site-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, ApiError, type ScannerRow } from "@/lib/api";
 import { fmtInt, fmtNum, fmtSigned } from "@/lib/format";
-import { RICHNESS_BG, RICHNESS_TEXT, richnessKey } from "@/lib/theme";
+import { RICHNESS_BG, RICHNESS_HINT, RICHNESS_TEXT, SKEW_BIAS_HINT, richnessKey } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 type SortKey = keyof Pick<
@@ -127,8 +128,12 @@ export default function ScannerPage() {
                       </span>
                     </TableHead>
                   ))}
-                  <TableHead>Skew Bias</TableHead>
-                  <TableHead>Richness</TableHead>
+                  <TableHead>
+                    Skew Bias <InfoHint text={SKEW_BIAS_HINT} />
+                  </TableHead>
+                  <TableHead>
+                    Richness <InfoHint text={RICHNESS_HINT} />
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -155,7 +160,9 @@ export default function ScannerPage() {
                       <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.skew, 2)}</TableCell>
                       <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.curvature, 2)}</TableCell>
                       <TableCell className="text-right font-mono tabular-nums">{fmtInt(row.days_of_history)}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{row.skew_bias ?? "—"}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {row.has_wing_data ? row.skew_bias : "—"}
+                      </TableCell>
                       <TableCell>
                         {/* Gated on richness_z, not richness_label -- the backend always returns SOME
                             label (e.g. "Neutral" is the documented fallback for "no signal yet", not a

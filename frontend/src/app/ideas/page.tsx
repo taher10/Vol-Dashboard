@@ -5,13 +5,23 @@ import { useRouter } from "next/navigation";
 import { ArrowDown, ArrowUp } from "lucide-react";
 
 import { ChartCard } from "@/components/chart-card";
+import { InfoHint } from "@/components/info-hint";
 import { SiteHeader } from "@/components/site-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, ApiError, type TradeIdea } from "@/lib/api";
 import { fmtDate, fmtNum, fmtPct } from "@/lib/format";
-import { COLOR_CALL, COLOR_PUT, RICHNESS_BG, RICHNESS_TEXT, richnessKey } from "@/lib/theme";
+import {
+  COLOR_CALL,
+  COLOR_PUT,
+  RICHNESS_BG,
+  RICHNESS_HINT,
+  RICHNESS_TEXT,
+  SKEW_BIAS_HINT,
+  richnessKey,
+} from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 type SortKey = keyof Pick<TradeIdea, "symbol" | "max_profit" | "max_loss" | "reward_risk" | "approx_pop" | "dte">;
@@ -204,8 +214,12 @@ export default function TradeIdeasPage() {
                     align="right"
                     onClick={() => toggleSort("dte")}
                   />
-                  <TableHead>Skew Bias</TableHead>
-                  <TableHead>Richness</TableHead>
+                  <TableHead>
+                    Skew Bias <InfoHint text={SKEW_BIAS_HINT} />
+                  </TableHead>
+                  <TableHead>
+                    Richness <InfoHint text={RICHNESS_HINT} />
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -231,9 +245,14 @@ export default function TradeIdeasPage() {
                             as a real mixed-signal risk on review. The structure name
                             itself already says "Bull"/"Bear", so the pill doesn't need to
                             re-encode direction by color at all. */}
-                        <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
-                          {idea.structure}
-                        </span>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex cursor-help rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
+                              {idea.structure}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-80 text-wrap">{idea.reason}</TooltipContent>
+                        </Tooltip>
                       </TableCell>
                       <TableCell>
                         <span className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
@@ -264,7 +283,9 @@ export default function TradeIdeasPage() {
                       <TableCell className="text-right font-mono text-xs tabular-nums">
                         {idea.dte}d · {fmtDate(idea.expiration)}
                       </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{idea.skew_bias ?? "—"}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {idea.has_wing_data ? idea.skew_bias : "—"}
+                      </TableCell>
                       <TableCell>
                         {/* Gated on richness_z, not richness_label -- same fallback-label
                             issue fixed on Vol Scanner: "Neutral" is the documented

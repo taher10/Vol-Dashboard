@@ -1,8 +1,9 @@
 "use client";
 
+import { InfoHint } from "@/components/info-hint";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fmtDate, fmtNum, fmtSigned } from "@/lib/format";
-import { RICHNESS_BG, RICHNESS_TEXT, richnessKey } from "@/lib/theme";
+import { RICHNESS_BG, RICHNESS_HINT, RICHNESS_TEXT, SKEW_BIAS_HINT, richnessKey } from "@/lib/theme";
 import type { ExpiryScoreRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -26,8 +27,12 @@ export function RichnessTable({
             <TableHead className="text-right">DTE</TableHead>
             <TableHead className="text-right">ATM IV</TableHead>
             <TableHead className="text-right">Richness z</TableHead>
-            <TableHead>IV Richness</TableHead>
-            <TableHead>Put/Call Skew</TableHead>
+            <TableHead>
+              Skew Bias <InfoHint text={SKEW_BIAS_HINT} />
+            </TableHead>
+            <TableHead>
+              Richness <InfoHint text={RICHNESS_HINT} />
+            </TableHead>
             <TableHead className="text-right">Curvature</TableHead>
           </TableRow>
         </TableHeader>
@@ -44,28 +49,27 @@ export function RichnessTable({
                 <TableCell className="text-right font-mono tabular-nums">{row.dte}</TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.atm_iv, 2)}</TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{fmtSigned(row.richness_z, 2)}</TableCell>
-                <TableCell>
-                  <span
-                    className="inline-flex rounded-full px-2 py-0.5 text-xs font-medium"
-                    style={{ backgroundColor: RICHNESS_BG[key], color: RICHNESS_TEXT[key] }}
-                  >
-                    {row.richness_label}
-                  </span>
+                <TableCell className="text-xs text-muted-foreground">
+                  {row.has_wing_data ? row.skew_bias : "—"}
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">{row.skew_bias}</TableCell>
+                <TableCell>
+                  {row.richness_z !== null && row.richness_label ? (
+                    <span
+                      className="inline-flex rounded-full px-2 py-0.5 text-xs font-medium"
+                      style={{ backgroundColor: RICHNESS_BG[key], color: RICHNESS_TEXT[key] }}
+                    >
+                      {row.richness_label}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
+                  )}
+                </TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.curvature, 2)}</TableCell>
               </TableRow>
             );
           })}
         </TableBody>
       </Table>
-      <p className="mt-3 text-xs text-muted-foreground">
-        <strong className="font-medium text-foreground">IV Richness</strong> compares this expiry&apos;s implied
-        vol to its own historical baseline (trailing IV history, or realized vol when that&apos;s available) —
-        Rich favors selling premium, Cheap favors buying.{" "}
-        <strong className="font-medium text-foreground">Put/Call Skew</strong> is separate: within this expiry&apos;s
-        smile, which side is priced richer relative to the other.
-      </p>
     </div>
   );
 }
