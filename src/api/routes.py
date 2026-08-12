@@ -596,6 +596,9 @@ _TRADE_IDEA_MAX_DTE = 60  # near-dated only -- see plan: far-dated expiries are 
                           # and not what a weekly-income-style feed should surface.
 _HIGH_CONVICTION_Z = 1.5  # meaningfully rich, not just barely (the plain "Rich" threshold is 0.5) --
                           # only reach for an undefined-risk CSP/Covered Call at this conviction level.
+_DEFAULT_MAX_TRADE_IDEAS = 8  # "efficient, not overloaded" (explicit user requirement) -- every
+                          # qualifying symbol could mean up to 20 cards, so keep only the most
+                          # notable signals rather than everything that happens to clear the bar.
 
 
 def _trade_idea(symbol: str) -> dict | None:
@@ -689,8 +692,15 @@ def _trade_idea(symbol: str) -> dict | None:
 
 
 @router.get("/trade-ideas")
-def trade_ideas() -> dict:
-    return {"ideas": [idea for sym in SYMBOL_REGISTRY if (idea := _trade_idea(sym)) is not None]}
+def trade_ideas(limit: int = Query(_DEFAULT_MAX_TRADE_IDEAS, ge=1, le=20)) -> dict:
+    ideas = [idea for sym in SYMBOL_REGISTRY if (idea := _trade_idea(sym)) is not None]
+    # Ranked by |richness_z| -- the same "how notable is this" signal that
+    # already picks which expiry counts as notable within one symbol, now
+    # also picking which symbols are worth a card at all. A richness_z of
+    # None (shouldn't happen once a trade exists, but stay defensive) sorts
+    # last rather than crashing the sort.
+    ideas.sort(key=lambda i: abs(i["richness_z"]) if i["richness_z"] is not None else -1.0, reverse=True)
+    return {"ideas": ideas[:limit]}
 
 
 # ---------------------------------------------------------------------------

@@ -77,4 +77,8 @@ SYMBOL_REGISTRY: dict[str, SymbolInfo] = {
     "JPM":   SymbolInfo("JPM", None, 20, "#eb6834"),   # slot 2 orange (cycled)
     "LITE":  SymbolInfo("LITE", None, 20, "#1baf7a"),  # slot 3 aqua (cycled)
     "NFLX":  SymbolInfo("NFLX", None, 20, "#eda100"),  # slot 4 yellow (cycled)
+    "APP":   SymbolInfo("APP", None, 20, "#e87ba4"),   # slot 5 magenta (cycled)
+    "RKLB":  SymbolInfo("RKLB", None, 20, "#008300"),  # slot 6 green (cycled)
+    "IREN":  SymbolInfo("IREN", None, 20, "#4a3aa7"),  # slot 7 violet (cycled)
+    "APLD":  SymbolInfo("APLD", None, 20, "#e34948"),  # slot 8 red (cycled)
 }
