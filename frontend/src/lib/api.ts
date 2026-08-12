@@ -248,10 +248,13 @@ export interface ScannerRow {
   dte: number | null;
   expiration: string | null;
   atm_iv: number | null;
+  iv_25p: number | null;
+  iv_25c: number | null;
   skew: number | null;
   skew_bias: string | null;
   has_wing_data: boolean;
   curvature: number | null;
+  realized_vol: number | null;
   richness_z: number | null;
   richness_label: string | null;
   richness_basis: "iv_history" | "vrp" | null;
@@ -263,6 +266,39 @@ export interface ScannerRow {
 export interface ScannerResponse {
   target_dte: number;
   rows: ScannerRow[];
+}
+
+export interface WingIvRow {
+  symbol: string;
+  color: string;
+  iv_25c: number;
+  iv_25p: number;
+}
+
+export interface WingIvResponse {
+  expiration: string | null;
+  available_expirations: ExpiryOption[];
+  rows: WingIvRow[];
+}
+
+export interface StrikeProfileRow {
+  strike: number;
+  call_iv: number | null;
+  put_iv: number | null;
+  call_delta: number | null;
+  put_delta: number | null;
+  call_gamma: number | null;
+  put_gamma: number | null;
+  call_oi: number | null;
+  put_oi: number | null;
+}
+
+export interface StrikeProfileResponse {
+  symbol: string;
+  expiration: string | null;
+  available_expirations: ExpiryOption[];
+  underlying_price: number | null;
+  strikes: StrikeProfileRow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +324,7 @@ export interface TradeIdea {
   reward_risk: number | null;
   approx_pop: number;
   breakevens: number[];
+  payoff: PayoffPoint[];
   richness_label: string | null;
   richness_z: number | null;
   richness_basis: "iv_history" | "vrp" | null;
@@ -397,6 +434,11 @@ export const api = {
     }),
 
   scanner: (targetDte = 30) => apiGet<ScannerResponse>("/api/scanner", { target_dte: targetDte }),
+
+  scannerWingIv: (expiration?: string) => apiGet<WingIvResponse>("/api/scanner/wing-iv", { expiration }),
+
+  scannerStrikeProfile: (symbol: string, expiration?: string) =>
+    apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),
 
   tradeIdeas: () => apiGet<TradeIdeasResponse>("/api/trade-ideas"),
 };
