@@ -54,8 +54,18 @@ class Leg:
     mid: float
 
 
+CONTRACT_MULTIPLIER = 100  # standard equity/index option contract size
+
+
 @dataclass
 class Candidate:
+    """net_debit_credit/max_profit/max_loss/payoff[].pnl are real per-contract
+    dollars (i.e. already × CONTRACT_MULTIPLIER) -- what a trader actually
+    pays/risks/makes trading one standard 100-share contract, matching every
+    real broker/tool (confirmed against OptionStrat). Leg.mid stays per-share
+    (that's how option premium is actually quoted, e.g. "$2.08"), and
+    breakevens/payoff[].underlying stay as stock price levels, never scaled."""
+
     structure: str
     direction: str
     expiration: pd.Timestamp
@@ -137,6 +147,9 @@ def _summarize(legs: list[Leg], n_points: int = 121, pad_pct: float = 0.08) -> d
 
     net_debit_credit = float(sum(leg.mid if leg.action == "buy" else -leg.mid for leg in legs))
 
+    # Breakevens are a zero-crossing PRICE, found before scaling pnl to
+    # dollars -- scaling wouldn't move where pnl==0 anyway, but reads clearer
+    # working in the same per-share units the intrinsic-value math above uses.
     breakevens: list[float] = []
     for i in range(len(prices) - 1):
         p0, p1 = pnl[i], pnl[i + 1]
@@ -146,12 +159,13 @@ def _summarize(legs: list[Leg], n_points: int = 121, pad_pct: float = 0.08) -> d
             frac = -p0 / (p1 - p0)
             breakevens.append(float(prices[i] + frac * (prices[i + 1] - prices[i])))
 
+    pnl_dollars = pnl * CONTRACT_MULTIPLIER
     return {
-        "net_debit_credit": net_debit_credit,
-        "max_profit": float(max(0.0, pnl.max())),
-        "max_loss": float(max(0.0, -pnl.min())),
+        "net_debit_credit": net_debit_credit * CONTRACT_MULTIPLIER,
+        "max_profit": float(max(0.0, pnl_dollars.max())),
+        "max_loss": float(max(0.0, -pnl_dollars.min())),
         "breakevens": breakevens,
-        "payoff": [{"underlying": float(p), "pnl": float(v)} for p, v in zip(prices, pnl)],
+        "payoff": [{"underlying": float(p), "pnl": float(v)} for p, v in zip(prices, pnl_dollars)],
     }
 
 
@@ -286,16 +300,16 @@ def build_cash_secured_put(chain: pd.DataFrame, expiration: pd.Timestamp, target
     breakeven = strike - premium
     prices = np.linspace(strike * 0.92, strike * 1.08, 121)
     pnl = premium - np.maximum(strike - prices, 0.0)
-    payoff = [{"underlying": float(p), "pnl": float(v)} for p, v in zip(prices, pnl)]
+    payoff = [{"underlying": float(p), "pnl": float(v) * CONTRACT_MULTIPLIER} for p, v in zip(prices, pnl)]
     return Candidate(
         structure="Cash Secured Put",
         direction="bullish",
         expiration=expiration,
         dte=int(exp_chain["dte"].iloc[0]),
         legs=[leg],
-        net_debit_credit=-premium,
-        max_profit=premium,
-        max_loss=max_loss,
+        net_debit_credit=-premium * CONTRACT_MULTIPLIER,
+        max_profit=premium * CONTRACT_MULTIPLIER,
+        max_loss=max_loss * CONTRACT_MULTIPLIER,
         breakevens=[breakeven],
         approx_pop=_approx_pop(exp_chain, [leg], [breakeven], is_credit=True),
         payoff=payoff,
@@ -362,16 +376,16 @@ def build_covered_call(
     stock_pnl = prices - underlying_price
     call_pnl = premium - np.maximum(prices - strike, 0.0)
     pnl = stock_pnl + call_pnl
-    payoff = [{"underlying": float(p), "pnl": float(v)} for p, v in zip(prices, pnl)]
+    payoff = [{"underlying": float(p), "pnl": float(v) * CONTRACT_MULTIPLIER} for p, v in zip(prices, pnl)]
     return Candidate(
         structure="Covered Call",
         direction="bullish",
         expiration=expiration,
         dte=int(exp_chain["dte"].iloc[0]),
         legs=[leg],
-        net_debit_credit=-premium,
-        max_profit=max_profit,
-        max_loss=max_loss,
+        net_debit_credit=-premium * CONTRACT_MULTIPLIER,
+        max_profit=max_profit * CONTRACT_MULTIPLIER,
+        max_loss=max_loss * CONTRACT_MULTIPLIER,
         breakevens=[breakeven],
         approx_pop=approx_pop,
         payoff=payoff,
@@ -441,12 +455,13 @@ class Recommendation:
 
 def _size_position(candidate: Candidate, capital: float) -> PositionSizing | None:
     """
-    How many contracts `capital` affords, using the standard 100-share
-    multiplier on the per-share max_loss already computed by _summarize().
-    None if capital doesn't cover even one contract (candidate.max_loss == 0
-    can't happen for a real spread with a nonzero width, but guarded anyway).
+    How many contracts `capital` affords. candidate.max_loss is already a
+    real per-contract dollar figure (see Candidate's docstring), not
+    per-share, so no further ×100 here. None if capital doesn't cover even
+    one contract (candidate.max_loss == 0 can't happen for a real spread
+    with a nonzero width, but guarded anyway).
     """
-    max_loss_per_contract = candidate.max_loss * 100
+    max_loss_per_contract = candidate.max_loss
     if max_loss_per_contract <= 0:
         return None
     contracts = int(capital // max_loss_per_contract)
@@ -459,8 +474,8 @@ def _size_position(candidate: Candidate, capital: float) -> PositionSizing | Non
         contracts=contracts,
         capital_used=capital_used,
         capital_used_pct=(capital_used / capital * 100) if capital > 0 else 0.0,
-        total_max_profit=contracts * candidate.max_profit * 100,
-        total_max_loss=contracts * candidate.max_loss * 100,
+        total_max_profit=contracts * candidate.max_profit,
+        total_max_loss=contracts * candidate.max_loss,
     )
 
 

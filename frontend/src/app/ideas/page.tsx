@@ -167,8 +167,11 @@ export default function TradeIdeasPage() {
       <SiteHeader title="Trade Ideas" />
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
         <p className="mb-4 text-xs text-muted-foreground">
-          One real example trade per symbol with a clear directional skew edge today -- same math Strategy Builder
-          uses, not a separate estimate. Symbols with a balanced smile (no clear edge) don't appear here.
+          The 8 symbols with the strongest richness signal today, ranked -- same math Strategy Builder uses, not a
+          separate estimate. Symbols with a balanced smile (no clear edge) never appear here. Credit spreads (selling
+          premium) only show up when IV reads Rich or Neutral; on a day where IV is cheap across most of the tracked
+          universe, expect an all-debit page -- that's buying cheap premium, which is the correct side to be on when
+          nothing is actually rich, not a bug.
         </p>
 
         <div className="mb-4 flex flex-wrap items-center gap-6 rounded-lg border border-border bg-card p-4">
