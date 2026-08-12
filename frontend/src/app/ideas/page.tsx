@@ -1,60 +1,130 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import Link from "next/link";
 
-import { ChartCard } from "@/components/chart-card";
+import { PayoffChart } from "@/components/charts/payoff-chart";
+import { InfoHint } from "@/components/info-hint";
 import { SiteHeader } from "@/components/site-header";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api, ApiError, type TradeIdea } from "@/lib/api";
 import { fmtDate, fmtNum, fmtPct } from "@/lib/format";
-import { COLOR_CALL, COLOR_PUT, RICHNESS_BG, RICHNESS_TEXT, richnessKey } from "@/lib/theme";
-import { cn } from "@/lib/utils";
+import {
+  COLOR_CALL,
+  COLOR_PUT,
+  RICHNESS_BG,
+  RICHNESS_HINT,
+  RICHNESS_TEXT,
+  SKEW_BIAS_HINT,
+  richnessKey,
+} from "@/lib/theme";
 
-type SortKey = keyof Pick<TradeIdea, "symbol" | "max_profit" | "max_loss" | "reward_risk" | "approx_pop" | "dte">;
+type SortKey = "reward_risk" | "approx_pop" | "max_profit" | "dte";
 type DirectionFilter = "all" | "bullish" | "bearish";
 type StructureFilter = "all" | "credit" | "debit";
 
-function SortableHead({
-  label,
-  active,
-  dir,
-  align,
-  sticky,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  dir: "asc" | "desc";
-  align?: "right";
-  sticky?: boolean;
-  onClick: () => void;
-}) {
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: "reward_risk", label: "Reward:Risk" },
+  { key: "approx_pop", label: "Approx POP" },
+  { key: "max_profit", label: "Max Profit" },
+  { key: "dte", label: "DTE" },
+];
+
+function IdeaCard({ idea }: { idea: TradeIdea }) {
+  const key = richnessKey(idea.richness_label);
   return (
-    <TableHead
-      className={cn("cursor-pointer select-none", align === "right" && "text-right", sticky && "sticky left-0 z-10 bg-card")}
-      onClick={onClick}
-    >
-      <span className={cn("inline-flex items-center gap-1", align === "right" && "justify-end")}>
-        {label}
-        {active && (dir === "desc" ? <ArrowDown className="size-3" /> : <ArrowUp className="size-3" />)}
-      </span>
-    </TableHead>
+    <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <span className="flex items-center gap-2">
+          <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: idea.color }} />
+          <span className="text-lg font-semibold">{idea.symbol}</span>
+          {/* Neutral styling, not green/red-by-direction -- those same hex values
+              are already used below for Max Profit/Max Loss, where green/red mean
+              profit/loss, not bullish/bearish. The structure name itself already
+              says "Bull"/"Bear", so the pill doesn't need to re-encode direction. */}
+          <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
+            {idea.structure}
+          </span>
+        </span>
+        <span className="shrink-0 text-right text-xs text-muted-foreground">
+          {idea.dte}d
+          <br />
+          {fmtDate(idea.expiration)}
+        </span>
+      </div>
+
+      <PayoffChart payoff={idea.payoff} breakevens={idea.breakevens} spot={idea.underlying_price} height={180} />
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        {idea.legs.map((leg, i) => (
+          <span key={i}>
+            {leg.action === "buy" ? "+" : "−"}
+            <span style={{ color: leg.optionType === "CALL" ? COLOR_CALL : COLOR_PUT }}>{leg.optionType}</span>{" "}
+            {fmtNum(leg.strike, leg.strike >= 1000 ? 0 : 1)}
+          </span>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 border-t border-border pt-3 text-sm sm:grid-cols-5">
+        <div>
+          <div className="text-xs text-muted-foreground">{idea.is_credit ? "Net credit" : "Net debit"}</div>
+          <div className="font-mono font-semibold">{fmtNum(Math.abs(idea.net_debit_credit), 2)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Max profit</div>
+          <div className="font-mono font-semibold text-[#0b5c0b]">{fmtNum(idea.max_profit, 2)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Max loss</div>
+          <div className="font-mono font-semibold text-[#8f2323]">{fmtNum(idea.max_loss, 2)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Reward:Risk</div>
+          <div className="font-mono font-semibold">{idea.reward_risk != null ? fmtNum(idea.reward_risk, 2) : "—"}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Approx POP</div>
+          <div className="font-mono font-semibold">{fmtPct(idea.approx_pop * 100, 0)}</div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">
+          Skew: {idea.has_wing_data ? idea.skew_bias : "—"}
+        </span>
+        {idea.richness_z !== null && idea.richness_label ? (
+          <span
+            className="inline-flex rounded-full px-2 py-0.5 text-xs font-medium"
+            style={{ backgroundColor: RICHNESS_BG[key], color: RICHNESS_TEXT[key] }}
+          >
+            {idea.richness_label}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">Richness: —</span>
+        )}
+      </div>
+
+      <p className="text-xs text-muted-foreground">{idea.reason}</p>
+
+      <Link
+        href={`/strategy/${idea.symbol}`}
+        className="ml-auto text-xs font-medium text-foreground underline underline-offset-2 hover:no-underline"
+      >
+        Open in Strategy Builder →
+      </Link>
+    </div>
   );
 }
 
 export default function TradeIdeasPage() {
-  const router = useRouter();
   const [data, setData] = useState<TradeIdea[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>("all");
   const [structureFilter, setStructureFilter] = useState<StructureFilter>("all");
   const [sortKey, setSortKey] = useState<SortKey>("reward_risk");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   useEffect(() => {
     let cancelled = false;
@@ -71,9 +141,9 @@ export default function TradeIdeasPage() {
     };
   }, []);
 
-  // Filter first, then sort -- nulls (only possible on reward_risk, when
-  // max_loss is somehow 0) always sort last regardless of direction, same
-  // convention as Vol Scanner.
+  // Filter first, then sort descending by the chosen key -- nulls (only
+  // possible on reward_risk, when max_loss is somehow 0) always sort last,
+  // same convention as Vol Scanner.
   const filteredSorted = useMemo(() => {
     let rows = data;
     if (directionFilter !== "all") rows = rows.filter((r) => r.direction === directionFilter);
@@ -87,22 +157,10 @@ export default function TradeIdeasPage() {
       if (av === null && bv === null) return 0;
       if (av === null) return 1;
       if (bv === null) return -1;
-      if (typeof av === "string" || typeof bv === "string") {
-        return sortDir === "asc" ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-      }
-      return sortDir === "asc" ? (av as number) - (bv as number) : (bv as number) - (av as number);
+      return bv - av;
     });
     return rows;
-  }, [data, directionFilter, structureFilter, sortKey, sortDir]);
-
-  function toggleSort(key: SortKey) {
-    if (key === sortKey) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortKey(key);
-      setSortDir("desc");
-    }
-  }
+  }, [data, directionFilter, structureFilter, sortKey]);
 
   return (
     <>
@@ -138,6 +196,24 @@ export default function TradeIdeasPage() {
               <ToggleGroupItem value="debit">Debit</ToggleGroupItem>
             </ToggleGroup>
           </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">Sort by</span>
+            <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
+              <SelectTrigger size="sm" className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SORT_OPTIONS.map((o) => (
+                  <SelectItem key={o.key} value={o.key}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+            Skew Bias <InfoHint text={SKEW_BIAS_HINT} /> · Richness <InfoHint text={RICHNESS_HINT} />
+          </div>
         </div>
 
         {error && (
@@ -147,7 +223,10 @@ export default function TradeIdeasPage() {
         )}
 
         {loading ? (
-          <Skeleton className="h-96 w-full" />
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Skeleton className="h-80 w-full" />
+            <Skeleton className="h-80 w-full" />
+          </div>
         ) : filteredSorted.length === 0 ? (
           <div className="rounded-md border border-border bg-muted px-4 py-3 text-sm text-muted-foreground">
             {data.length === 0
@@ -155,137 +234,11 @@ export default function TradeIdeasPage() {
               : "No ideas match the current filters."}
           </div>
         ) : (
-          <ChartCard title="Trade Ideas" bodyClassName="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <SortableHead
-                    label="Symbol"
-                    active={sortKey === "symbol"}
-                    dir={sortDir}
-                    sticky
-                    onClick={() => toggleSort("symbol")}
-                  />
-                  <TableHead>Trade</TableHead>
-                  <TableHead>Legs</TableHead>
-                  <TableHead className="text-right">Net Credit/Debit</TableHead>
-                  <SortableHead
-                    label="Max Profit"
-                    active={sortKey === "max_profit"}
-                    dir={sortDir}
-                    align="right"
-                    onClick={() => toggleSort("max_profit")}
-                  />
-                  <SortableHead
-                    label="Max Loss"
-                    active={sortKey === "max_loss"}
-                    dir={sortDir}
-                    align="right"
-                    onClick={() => toggleSort("max_loss")}
-                  />
-                  <SortableHead
-                    label="Reward:Risk"
-                    active={sortKey === "reward_risk"}
-                    dir={sortDir}
-                    align="right"
-                    onClick={() => toggleSort("reward_risk")}
-                  />
-                  <SortableHead
-                    label="Approx POP"
-                    active={sortKey === "approx_pop"}
-                    dir={sortDir}
-                    align="right"
-                    onClick={() => toggleSort("approx_pop")}
-                  />
-                  <SortableHead
-                    label="DTE / Expiration"
-                    active={sortKey === "dte"}
-                    dir={sortDir}
-                    align="right"
-                    onClick={() => toggleSort("dte")}
-                  />
-                  <TableHead>Skew Bias</TableHead>
-                  <TableHead>Richness</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredSorted.map((idea) => {
-                  const key = richnessKey(idea.richness_label);
-                  return (
-                    <TableRow
-                      key={idea.symbol}
-                      className="cursor-pointer"
-                      onClick={() => router.push(`/strategy/${idea.symbol}`)}
-                    >
-                      <TableCell className="sticky left-0 z-10 bg-card font-medium">
-                        <span className="inline-flex items-center gap-2">
-                          <span className="size-2 rounded-full" style={{ backgroundColor: idea.color }} />
-                          {idea.symbol}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        {/* Neutral styling, not green/red-by-direction -- those same hex
-                            values are already used for Max Profit/Max Loss two columns
-                            over, where green/red mean profit/loss, not bullish/bearish.
-                            Reusing them here for a different meaning in the same row read
-                            as a real mixed-signal risk on review. The structure name
-                            itself already says "Bull"/"Bear", so the pill doesn't need to
-                            re-encode direction by color at all. */}
-                        <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-foreground">
-                          {idea.structure}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        <span className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-                          {idea.legs.map((leg, i) => (
-                            <span key={i}>
-                              {leg.action === "buy" ? "+" : "−"}
-                              <span style={{ color: leg.optionType === "CALL" ? COLOR_CALL : COLOR_PUT }}>
-                                {leg.optionType}
-                              </span>{" "}
-                              {fmtNum(leg.strike, leg.strike >= 1000 ? 0 : 1)}
-                            </span>
-                          ))}
-                        </span>
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {fmtNum(Math.abs(idea.net_debit_credit), 2)} {idea.is_credit ? "Cr" : "Db"}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums text-[#0b5c0b]">
-                        {fmtNum(idea.max_profit, 2)}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums text-[#8f2323]">
-                        {fmtNum(idea.max_loss, 2)}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {idea.reward_risk != null ? fmtNum(idea.reward_risk, 2) : "—"}
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">{fmtPct(idea.approx_pop * 100, 0)}</TableCell>
-                      <TableCell className="text-right font-mono text-xs tabular-nums">
-                        {idea.dte}d · {fmtDate(idea.expiration)}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{idea.skew_bias ?? "—"}</TableCell>
-                      <TableCell>
-                        {/* Gated on richness_z, not richness_label -- same fallback-label
-                            issue fixed on Vol Scanner: "Neutral" is the documented
-                            no-signal default, not a real reading, when richness_z is null. */}
-                        {idea.richness_z !== null && idea.richness_label ? (
-                          <span
-                            className="inline-flex rounded-full px-2 py-0.5 text-xs font-medium"
-                            style={{ backgroundColor: RICHNESS_BG[key], color: RICHNESS_TEXT[key] }}
-                          >
-                            {idea.richness_label}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </ChartCard>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {filteredSorted.map((idea) => (
+              <IdeaCard key={idea.symbol} idea={idea} />
+            ))}
+          </div>
         )}
       </main>
     </>

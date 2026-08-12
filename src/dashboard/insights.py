@@ -103,7 +103,7 @@ class Commentary:
     example_trade: Candidate | None
 
 
-def _pop_judgment(max_profit: float, max_loss: float) -> str:
+def pop_judgment(max_profit: float, max_loss: float) -> str:
     """
     A short qualitative read of the reward:risk ratio -- deliberately coarse
     (3 buckets) since a single ratio number doesn't need a false-precision
@@ -123,6 +123,32 @@ def _pop_judgment(max_profit: float, max_loss: float) -> str:
     return (
         "thin compensation for the risk being priced -- the size of the premium here "
         "mostly just reflects the size of the risk, not an exploitable mispricing"
+    )
+
+
+def high_conviction_trade_reason(
+    trade: Candidate, richness_z: float, richness_basis: str | None, skew_bias: str
+) -> str:
+    """Reason text for a Cash Secured Put / Covered Call chosen via
+    _trade_idea()'s high-conviction override (src/api/routes.py). Unlike
+    expiry_commentary()'s trade_angle, this describes the actual selected
+    trade rather than a generic vertical example -- the override replaces
+    that example outright, so its numbers would otherwise be stale/wrong
+    here. Reuses the same basis phrasing and pop_judgment() reward:risk
+    read expiry_commentary() uses, so the two paths read consistently."""
+    basis = "its own realized vol" if richness_basis == "vrp" else "its own historical IV range"
+    is_csp = trade.structure == "Cash Secured Put"
+    side = "puts" if is_csp else "calls"
+    ownership = "owning the stock at the strike" if is_csp else "the stock being called away at the strike"
+    verb = "collect" if trade.net_debit_credit < 0 else "cost"
+    legs_desc = ", ".join(f"{leg.action} {leg.optionType} {leg.strike:g}" for leg in trade.legs)
+    judgment = pop_judgment(trade.max_profit, trade.max_loss)
+    return (
+        f"IV here is rich (z={richness_z:+.1f}) vs. {basis}, with {side} pricing richer than the other side "
+        f"-- elevated enough to sell that premium outright as a {trade.structure} ({legs_desc}) rather than a "
+        f"defined-risk spread. Would {verb} ${abs(trade.net_debit_credit):.2f}, risking ${trade.max_loss:.2f} to "
+        f"make ${trade.max_profit:.2f} (~{trade.approx_pop * 100:.0f}% approx POP) if you're comfortable with "
+        f"{ownership} -- {judgment}."
     )
 
 
@@ -165,7 +191,7 @@ def expiry_commentary(
         )
 
     if example_trade is not None:
-        judgment = _pop_judgment(example_trade.max_profit, example_trade.max_loss)
+        judgment = pop_judgment(example_trade.max_profit, example_trade.max_loss)
         legs_desc = ", ".join(f"{leg.action} {leg.optionType} {leg.strike:g}" for leg in example_trade.legs)
         verb = "collect" if example_trade.net_debit_credit < 0 else "cost"
         trade_angle = (

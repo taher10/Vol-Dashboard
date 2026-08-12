@@ -102,6 +102,24 @@ def _underlying_price(chain: pd.DataFrame | None) -> float | None:
     return float(values.iloc[0]) if not values.empty else None
 
 
+def _realized_vol(metrics: dict[str, pd.DataFrame]) -> float | None:
+    """This symbol's trailing realized vol (VolatilityMetrics.vrp()'s single
+    rolling-window number, broadcast to every row of that table -- same
+    "any non-null row works" shape as _underlying_price above). Read
+    straight from the metrics bundle rather than through
+    decision_engine.score_expiries()'s exact-(expiration,dte) merge: vrp's
+    source table isn't recomputed daily (needs price history, which job.py
+    stopped collecting to save API calls), so its dte values drift stale
+    against the freshly-computed term_structure table and the merge silently
+    produces no match -- realized_vol isn't actually per-expiry data anyway,
+    so there's nothing lost by reading it directly instead of joining it."""
+    vrp_df = metrics.get("vrp")
+    if vrp_df is None or vrp_df.empty or "realized_vol" not in vrp_df.columns:
+        return None
+    values = vrp_df["realized_vol"].dropna()
+    return float(values.iloc[0]) if not values.empty else None
+
+
 def _expirations_list(chain: pd.DataFrame) -> list[dict]:
     if chain is None or chain.empty or "expiration" not in chain.columns:
         return []
@@ -160,9 +178,13 @@ def _scanner_row(symbol: str, target_dte: int) -> dict:
             "dte": None,
             "expiration": None,
             "atm_iv": None,
+            "iv_25p": None,
+            "iv_25c": None,
             "skew": None,
             "skew_bias": None,
+            "has_wing_data": False,
             "curvature": None,
+            "realized_vol": None,
             "richness_z": None,
             "richness_label": None,
             "richness_basis": None,
@@ -200,9 +222,13 @@ def _scanner_row(symbol: str, target_dte: int) -> dict:
         "dte": clean_value(row["dte"]) if row is not None else None,
         "expiration": clean_value(row["expiration"]) if row is not None else None,
         "atm_iv": clean_value(row["atm_iv"]) if row is not None else None,
+        "iv_25p": clean_value(row.get("iv_25p")) if row is not None else None,
+        "iv_25c": clean_value(row.get("iv_25c")) if row is not None else None,
         "skew": clean_value(row["skew"]) if row is not None else None,
         "skew_bias": clean_value(row["skew_bias"]) if row is not None else None,
+        "has_wing_data": bool(row["has_wing_data"]) if row is not None else False,
         "curvature": clean_value(row["curvature"]) if row is not None else None,
+        "realized_vol": _realized_vol(bundle.metrics),
         "richness_z": clean_value(row["richness_z"]) if row is not None else None,
         "richness_label": clean_value(row["richness_label"]) if row is not None else None,
         "richness_basis": clean_value(row["richness_basis"]) if row is not None else None,
@@ -215,6 +241,150 @@ def _scanner_row(symbol: str, target_dte: int) -> dict:
 @router.get("/scanner")
 def scanner(target_dte: int = Query(30, ge=0, le=3650)) -> dict:
     return {"target_dte": target_dte, "rows": [_scanner_row(sym, target_dte) for sym in SYMBOL_REGISTRY]}
+
+
+def _wing_iv_snapshot(expiration: str | None) -> dict:
+    """Call/Put 25-delta IV for every symbol that literally lists
+    `expiration` (a YYYY-MM-DD date string) in its own chain, for the Vol
+    Scanner's Call IV vs Put IV chart. Deliberately reads each symbol's full
+    per-expiration skew table (bundle.metrics["skew"]) instead of
+    _scanner_row()'s single nearest-to-target-dte row -- that row is a
+    different, symbol-specific expiration for nearly every symbol (a 30 DTE
+    pick for AAPL isn't the same calendar date as a 30 DTE pick for TSLA),
+    which would make a "same expiration across tickers" comparison
+    meaningless. A symbol that doesn't have this exact expiration (or
+    couldn't interpolate 25-delta IV for it) is simply absent from `rows`,
+    not included with nulls -- there's no "no signal yet" case here the way
+    there is for richness_z, it's just a calendar mismatch."""
+    all_expirations: dict[str, int] = {}
+    per_symbol_valid: dict[str, pd.DataFrame] = {}
+    for symbol in SYMBOL_REGISTRY:
+        try:
+            bundle = data_loader.load_latest_snapshot(symbol)
+        except FileNotFoundError:
+            continue
+        skew_df = bundle.metrics.get("skew")
+        if skew_df is None or skew_df.empty:
+            continue
+        valid = skew_df.dropna(subset=["iv_25p", "iv_25c"]).copy()
+        if valid.empty:
+            continue
+        valid["expiration_str"] = valid["expiration"].apply(lambda e: pd.Timestamp(e).date().isoformat())
+        per_symbol_valid[symbol] = valid
+        for _, r in valid.iterrows():
+            all_expirations.setdefault(r["expiration_str"], int(r["dte"]))
+
+    available_expirations = [{"expiration": exp, "dte": dte} for exp, dte in sorted(all_expirations.items())]
+
+    if expiration is None and available_expirations:
+        expiration = min(available_expirations, key=lambda e: abs(e["dte"] - 30))["expiration"]
+
+    rows: list[dict] = []
+    if expiration:
+        for symbol, valid in per_symbol_valid.items():
+            match = valid[valid["expiration_str"] == expiration]
+            if match.empty:
+                continue
+            r = match.iloc[0]
+            rows.append({
+                "symbol": symbol,
+                "color": SYMBOL_REGISTRY[symbol].color,
+                "iv_25c": clean_value(r["iv_25c"]),
+                "iv_25p": clean_value(r["iv_25p"]),
+            })
+
+    return {"expiration": expiration, "available_expirations": available_expirations, "rows": rows}
+
+
+@router.get("/scanner/wing-iv")
+def scanner_wing_iv(expiration: str | None = Query(None)) -> dict:
+    return _wing_iv_snapshot(expiration)
+
+
+def _strike_profile_snapshot(symbol: str, expiration: str | None) -> dict:
+    """Full per-strike IV/delta/gamma/OI curve for one symbol+expiration --
+    unlike every other Vol Scanner chart, this deliberately reads the raw
+    chain directly (not decision_engine.score_expiries()'s per-expiration
+    summary), since delta/gamma/OI only exist at the individual-contract
+    level and were never meant to be summarized into one number per expiry.
+    Calls and puts are matched by strike into one row each so a caller can
+    plot both sides against a single shared x-axis."""
+    empty = {
+        "symbol": symbol,
+        "expiration": None,
+        "available_expirations": [],
+        "underlying_price": None,
+        "strikes": [],
+    }
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return empty
+    chain = bundle.chain
+    if chain is None or chain.empty:
+        return empty
+
+    exp_dte = chain[["expiration", "dte"]].dropna().drop_duplicates()
+    available_expirations = sorted(
+        (
+            {"expiration": pd.Timestamp(row["expiration"]).date().isoformat(), "dte": int(row["dte"])}
+            for _, row in exp_dte.iterrows()
+        ),
+        key=lambda e: e["expiration"],
+    )
+    if not available_expirations:
+        return empty
+
+    if expiration is None:
+        expiration = min(available_expirations, key=lambda e: abs(e["dte"] - 30))["expiration"]
+
+    chain = chain.copy()
+    chain["expiration_str"] = chain["expiration"].apply(lambda e: pd.Timestamp(e).date().isoformat())
+    exp_chain = chain[chain["expiration_str"] == expiration]
+
+    call_by_strike: dict[float, pd.Series] = {}
+    put_by_strike: dict[float, pd.Series] = {}
+    for _, row in exp_chain.iterrows():
+        strike = row.get("strikePrice")
+        if strike is None or pd.isna(strike):
+            continue
+        target = call_by_strike if row.get("optionType") == "CALL" else put_by_strike
+        target[float(strike)] = row
+
+    strikes = []
+    for strike in sorted(set(call_by_strike) | set(put_by_strike)):
+        c = call_by_strike.get(strike)
+        p = put_by_strike.get(strike)
+        strikes.append({
+            "strike": strike,
+            "call_iv": clean_value(c["impliedVolatility"]) if c is not None else None,
+            "put_iv": clean_value(p["impliedVolatility"]) if p is not None else None,
+            "call_delta": clean_value(c["delta"]) if c is not None else None,
+            "put_delta": clean_value(p["delta"]) if p is not None else None,
+            "call_gamma": clean_value(c["gamma"]) if c is not None else None,
+            "put_gamma": clean_value(p["gamma"]) if p is not None else None,
+            "call_oi": clean_value(c["openInterest"]) if c is not None else None,
+            "put_oi": clean_value(p["openInterest"]) if p is not None else None,
+        })
+
+    return {
+        "symbol": symbol,
+        "expiration": expiration,
+        "available_expirations": available_expirations,
+        "underlying_price": _underlying_price(bundle.chain),
+        "strikes": strikes,
+    }
+
+
+@router.get("/scanner/strike-profile")
+def scanner_strike_profile(
+    symbol: str = Query(...),
+    expiration: str | None = Query(None),
+) -> dict:
+    symbol = symbol.upper()
+    if symbol not in SYMBOL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
+    return _strike_profile_snapshot(symbol, expiration)
 
 
 # ---------------------------------------------------------------------------
@@ -478,41 +648,43 @@ def _trade_idea(symbol: str) -> dict | None:
     expiration = notable_row["expiration"]
 
     trade = None
+    reason = None
     if high_conviction and notable_row["richness_label"] == "Rich":
         if skew_bias in ("Puts richer", "Balanced"):
             trade = strategy_engine.build_cash_secured_put(bundle.chain, expiration)
         elif skew_bias == "Calls richer":
             trade = strategy_engine.build_covered_call(bundle.chain, expiration, _underlying_price(bundle.chain))
+        if trade is not None:
+            reason = insights.high_conviction_trade_reason(trade, richness_z, notable_row["richness_basis"], skew_bias)
     if trade is None:
         trade = commentary.example_trade
+        reason = commentary.trade_angle
     if trade is None:
         return None  # Balanced skew_bias at moderate conviction -- no directional edge, correctly no idea here.
 
     reward_risk = clean_value(trade.max_profit / trade.max_loss) if trade.max_loss > 0 else None
 
     return {
+        # structure/direction/expiration/dte/legs/net_debit_credit/max_profit/
+        # max_loss/breakevens/approx_pop/payoff all come from here -- same
+        # serialization Strategy Builder and Backtest already use, so this
+        # picks up payoff (needed for Trade Ideas' own payoff chart) for free
+        # instead of a second hand-rolled, payoff-less copy of the same dict.
+        **_candidate_record(trade),
         "symbol": symbol,
         "color": info.color,
         "underlying_price": _underlying_price(bundle.chain),
         "as_of": bundle.as_of.isoformat(),
         "headline": commentary.headline,
-        "structure": trade.structure,
-        "direction": trade.direction,
+        "reason": reason,
         "is_credit": trade.net_debit_credit < 0,
-        "expiration": pd.Timestamp(trade.expiration).date().isoformat(),
-        "dte": trade.dte,
-        "legs": [_leg_record(leg) for leg in trade.legs],
-        "net_debit_credit": clean_value(trade.net_debit_credit),
-        "max_profit": clean_value(trade.max_profit),
-        "max_loss": clean_value(trade.max_loss),
         "reward_risk": reward_risk,
-        "approx_pop": clean_value(trade.approx_pop),
-        "breakevens": [clean_value(b) for b in trade.breakevens],
         "richness_label": clean_value(notable_row["richness_label"]),
         "richness_z": clean_value(notable_row["richness_z"]),
         "richness_basis": clean_value(notable_row["richness_basis"]),
         "skew_bias": clean_value(notable_row["skew_bias"]),
         "skew": clean_value(notable_row["skew"]),
+        "has_wing_data": bool(notable_row["has_wing_data"]),
     }
 
 

@@ -34,3 +34,16 @@ export function richnessKey(label: string | null | undefined): "cheap" | "rich" 
   if (lower === "rich") return "rich";
   return "neutral";
 }
+
+// Shared column-header explainer text -- same wording everywhere (Overview,
+// Vol Scanner, Trade Ideas) so "Richness" and "Skew Bias" mean one consistent
+// thing across the app, not a slightly different explanation per page.
+export const RICHNESS_HINT =
+  "How expensive this expiry's IV looks vs. its own history (or realized vol, when available) -- " +
+  "Rich means premium looks expensive to sell, Cheap means it looks expensive to buy. Says nothing " +
+  "about which side (puts or calls) is pricier -- that's Skew Bias.";
+
+export const SKEW_BIAS_HINT =
+  "Which side of the smile is priced richer: put IV vs. call IV the same distance from the money. " +
+  "Independent of Richness -- a cheap-IV expiry can still have a strong skew tilt, and vice versa, " +
+  "so the two labels can disagree without it being a contradiction.";

@@ -284,6 +284,9 @@ def build_cash_secured_put(chain: pd.DataFrame, expiration: pd.Timestamp, target
 
     leg = Leg("sell", "PUT", strike, float(primary["delta"]), premium)
     breakeven = strike - premium
+    prices = np.linspace(strike * 0.92, strike * 1.08, 121)
+    pnl = premium - np.maximum(strike - prices, 0.0)
+    payoff = [{"underlying": float(p), "pnl": float(v)} for p, v in zip(prices, pnl)]
     return Candidate(
         structure="Cash Secured Put",
         direction="bullish",
@@ -295,7 +298,7 @@ def build_cash_secured_put(chain: pd.DataFrame, expiration: pd.Timestamp, target
         max_loss=max_loss,
         breakevens=[breakeven],
         approx_pop=_approx_pop(exp_chain, [leg], [breakeven], is_credit=True),
-        payoff=[],
+        payoff=payoff,
     )
 
 
@@ -347,6 +350,19 @@ def build_covered_call(
     # with 1-d, backwards from the obvious "already past breakeven" case).
     delta_at_breakeven = _delta_at_price(exp_chain, "CALL", breakeven)
     approx_pop = max(0.0, delta_at_breakeven) if delta_at_breakeven is not None else 0.0
+    # Unlike build_cash_secured_put, this can't just sample the option leg
+    # alone -- a naked short call's own payoff has unlimited loss above the
+    # strike, which is only right once the +100 owned shares are added back
+    # in (the whole point of "covered"). Padded around both spot and strike
+    # (not spot alone) so the capped-upside plateau past the strike is
+    # always visible even when the strike sits well above current price.
+    lo = min(underlying_price, strike) * 0.85
+    hi = max(underlying_price, strike) * 1.15
+    prices = np.linspace(lo, hi, 121)
+    stock_pnl = prices - underlying_price
+    call_pnl = premium - np.maximum(prices - strike, 0.0)
+    pnl = stock_pnl + call_pnl
+    payoff = [{"underlying": float(p), "pnl": float(v)} for p, v in zip(prices, pnl)]
     return Candidate(
         structure="Covered Call",
         direction="bullish",
@@ -358,7 +374,7 @@ def build_covered_call(
         max_loss=max_loss,
         breakevens=[breakeven],
         approx_pop=approx_pop,
-        payoff=[],
+        payoff=payoff,
     )
 
 
