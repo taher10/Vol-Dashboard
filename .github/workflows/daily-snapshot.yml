@@ -11,11 +11,16 @@ name: Daily vol snapshot
 # chain and daily close prices (see src/schwab_database.py), populated as a
 # side effect of the same OptionsVolJob.run() call this workflow already
 # makes. This table is much larger than vol_history.db's compact per-expiry
-# metrics (roughly 1,000+ rows/symbol/day vs. ~16), so watch repo size over
-# time -- revisit with a retention window or Git LFS if it becomes a
-# problem. A live pull with no usable quotes (outside market hours) raises
-# LiveDataUnavailableError and neither file gets touched that day -- see
-# src/data_quality.py.
+# metrics (roughly 1,000+ rows/symbol/day vs. ~16) and was growing ~13-14MB/
+# day -- it crossed GitHub's 100MB per-file push limit around 2026-08-14 and
+# started silently failing at the final "Commit history" step (fetch/token
+# steps still succeeded, so this was easy to miss). Tracked via Git LFS
+# (.gitattributes) since 2026-08-20 to fix that; see actions/checkout's
+# `lfs: true` below. Free-tier GitHub LFS storage/bandwidth is 1GB/month --
+# at the same growth rate that's ~10 weeks of runway before this needs a
+# retention window (trim old raw snapshots) or a paid data pack. A live pull
+# with no usable quotes (outside market hours) raises LiveDataUnavailableError
+# and neither file gets touched that day -- see src/data_quality.py.
 #
 # Requires these repo secrets (Settings -> Secrets and variables -> Actions),
 # same values as the Streamlit Cloud secrets -- see README.md:
@@ -48,7 +53,12 @@ jobs:
   snapshot:
     runs-on: ubuntu-latest
     steps:
+      # lfs: true installs the LFS filters/hooks this checkout needs both to
+      # pull the existing LFS-tracked database/schwab_database.db and to
+      # push new versions of it correctly in the "Commit history" step below.
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: actions/setup-python@v5
         with:
