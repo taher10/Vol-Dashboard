@@ -120,6 +120,18 @@ def _realized_vol(metrics: dict[str, pd.DataFrame]) -> float | None:
     return float(values.iloc[0]) if not values.empty else None
 
 
+def _live_dte(expiration) -> int:
+    """Days from today's REAL wall-clock date to `expiration` -- deliberately
+    not the `dte` column baked into the chain at fetch time, which is frozen
+    at whatever "today" was when that snapshot was pulled and goes stale (or
+    even negative, i.e. already expired) the moment the pipeline falls more
+    than a day behind. Used anywhere a user is picking a LIVE/current
+    expiration (PCR chart, Strike Profile, Calendar Edge leaderboard) --
+    NOT by _expirations_list()/backtest, where dte-relative-to-the-
+    historical-entry-date is exactly what's wanted, not today's date."""
+    return (pd.Timestamp(expiration).date() - date.today()).days
+
+
 def _expirations_list(chain: pd.DataFrame) -> list[dict]:
     if chain is None or chain.empty or "expiration" not in chain.columns:
         return []
@@ -255,7 +267,7 @@ def _pcr_snapshot(expiration: str | None) -> dict:
     (can't form a ratio) is simply absent from `rows`, matching the same
     "calendar/data mismatch, not a signal" convention _wing_iv_snapshot used
     to follow for this same chart's expiration selector."""
-    all_expirations: dict[str, int] = {}
+    all_expirations: set[str] = set()
     per_symbol_chain: dict[str, pd.DataFrame] = {}
     for symbol in SYMBOL_REGISTRY:
         try:
@@ -270,10 +282,17 @@ def _pcr_snapshot(expiration: str | None) -> dict:
             continue
         chain["expiration_str"] = chain["expiration"].apply(lambda e: pd.Timestamp(e).date().isoformat())
         per_symbol_chain[symbol] = chain
-        for exp_str, dte in chain[["expiration_str", "dte"]].drop_duplicates().itertuples(index=False):
-            all_expirations.setdefault(exp_str, int(dte))
+        all_expirations.update(chain["expiration_str"].unique())
 
-    available_expirations = [{"expiration": exp, "dte": dte} for exp, dte in sorted(all_expirations.items())]
+    # dte computed live against today, not the stale per-symbol dte column
+    # (see _live_dte()) -- and an expiration already behind today's real
+    # date is dropped outright rather than offered as a pickable "current"
+    # expiration.
+    available_expirations = [
+        {"expiration": exp, "dte": dte}
+        for exp in sorted(all_expirations)
+        if (dte := _live_dte(exp)) >= 0
+    ]
 
     if expiration is None and available_expirations:
         expiration = min(available_expirations, key=lambda e: abs(e["dte"] - 30))["expiration"]
@@ -322,7 +341,12 @@ def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta:
     if chain is None or chain.empty or "expiration" not in chain.columns:
         return None
 
-    dte_table = chain[["expiration", "dte"]].dropna().drop_duplicates().sort_values("dte")
+    # dte computed live against today (see _live_dte()), not the stale
+    # per-contract dte column -- otherwise a stale snapshot could pick an
+    # already-expired contract as the "front" or "back" leg.
+    dte_table = chain[["expiration"]].dropna().drop_duplicates()
+    dte_table["dte"] = dte_table["expiration"].apply(_live_dte)
+    dte_table = dte_table[dte_table["dte"] >= 0].sort_values("dte")
     if dte_table.empty:
         return None
     front_idx = (dte_table["dte"] - front_dte).abs().idxmin()
@@ -384,11 +408,14 @@ def _strike_profile_snapshot(symbol: str, expiration: str | None) -> dict:
     if chain is None or chain.empty:
         return empty
 
-    exp_dte = chain[["expiration", "dte"]].dropna().drop_duplicates()
+    # dte computed live against today (see _live_dte()), not the stale
+    # per-contract dte column -- and an expiration already behind today's
+    # real date is dropped rather than offered as a pickable "current" one.
     available_expirations = sorted(
         (
-            {"expiration": pd.Timestamp(row["expiration"]).date().isoformat(), "dte": int(row["dte"])}
-            for _, row in exp_dte.iterrows()
+            {"expiration": exp_str, "dte": dte}
+            for exp_str in chain["expiration"].dropna().apply(lambda e: pd.Timestamp(e).date().isoformat()).unique()
+            if (dte := _live_dte(exp_str)) >= 0
         ),
         key=lambda e: e["expiration"],
     )
