@@ -15,7 +15,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { VolBarChart, type VolBarRow } from "@/components/charts/vol-bar-chart";
 import { VolScatterChart, type VolScatterPoint } from "@/components/charts/vol-scatter-chart";
 import { StrikeProfileChart, type StrikeProfileMetric } from "@/components/charts/strike-profile-chart";
-import { api, ApiError, type ExpiryOption, type ScannerRow, type StrikeProfileRow } from "@/lib/api";
+import { api, ApiError, type CalendarEdgeRow, type ExpiryOption, type ScannerRow, type StrikeProfileRow } from "@/lib/api";
 import { fmtDate, fmtInt, fmtNum, fmtSigned } from "@/lib/format";
 import { RICHNESS_BG, RICHNESS_HINT, RICHNESS_TEXT, SKEW_BIAS_HINT, richnessKey } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -44,13 +44,13 @@ export default function ScannerPage() {
   const [sortKey, setSortKey] = useState<SortKey>("richness_z");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  const [wingExpirations, setWingExpirations] = useState<ExpiryOption[]>([]);
+  const [pcrExpirations, setPcrExpirations] = useState<ExpiryOption[]>([]);
   // Empty string (not null) so the Select stays controlled from the first
   // render -- same reason as Backtest's entry-date Select.
-  const [wingExpiration, setWingExpiration] = useState("");
-  const [wingPoints, setWingPoints] = useState<VolScatterPoint[]>([]);
-  const [wingLoading, setWingLoading] = useState(true);
-  const [wingError, setWingError] = useState<string | null>(null);
+  const [pcrExpiration, setPcrExpiration] = useState("");
+  const [pcrRows, setPcrRows] = useState<VolBarRow[]>([]);
+  const [pcrLoading, setPcrLoading] = useState(true);
+  const [pcrError, setPcrError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,19 +67,19 @@ export default function ScannerPage() {
     };
   }, []);
 
-  // Available expirations for the Call IV vs Put IV chart -- and the
-  // backend's own nearest-to-30-DTE default, so the chart isn't empty
-  // before the user picks anything.
+  // Available expirations for the PCR chart -- and the backend's own
+  // nearest-to-30-DTE default, so the chart isn't empty before the user
+  // picks anything.
   useEffect(() => {
     let cancelled = false;
     api
-      .scannerWingIv()
+      .scannerPcr()
       .then((res) => {
         if (cancelled) return;
-        setWingExpirations(res.available_expirations);
-        setWingExpiration(res.expiration ?? "");
+        setPcrExpirations(res.available_expirations);
+        setPcrExpiration(res.expiration ?? "");
       })
-      .catch(() => !cancelled && setWingError("Failed to load available expirations."));
+      .catch(() => !cancelled && setPcrError("Failed to load available expirations."));
     return () => {
       cancelled = true;
     };
@@ -89,23 +89,42 @@ export default function ScannerPage() {
   // literally list this exact calendar expiration come back, matching what
   // the user asked to see (not every symbol's own nearest-30-DTE pick).
   useEffect(() => {
-    if (!wingExpiration) return;
+    if (!pcrExpiration) return;
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- standard fetch-reset pattern, guarded by `cancelled`
-    setWingLoading(true);
-    setWingError(null);
+    setPcrLoading(true);
+    setPcrError(null);
     api
-      .scannerWingIv(wingExpiration)
+      .scannerPcr(pcrExpiration)
       .then((res) => {
         if (cancelled) return;
-        setWingPoints(res.rows.map((r) => ({ symbol: r.symbol, color: r.color, x: r.iv_25c, y: r.iv_25p })));
+        setPcrRows(res.rows.map((r) => ({ symbol: r.symbol, color: r.color, value: r.pcr })));
       })
-      .catch(() => !cancelled && setWingError("Failed to load call/put IV for this expiration."))
-      .finally(() => !cancelled && setWingLoading(false));
+      .catch(() => !cancelled && setPcrError("Failed to load put/call ratio for this expiration."))
+      .finally(() => !cancelled && setPcrLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [wingExpiration]);
+  }, [pcrExpiration]);
+
+  const [calendarEdgeRows, setCalendarEdgeRows] = useState<CalendarEdgeRow[]>([]);
+  const [calendarEdgeLoading, setCalendarEdgeLoading] = useState(true);
+  const [calendarEdgeError, setCalendarEdgeError] = useState<string | null>(null);
+
+  // Same-day estimate, every symbol in one call -- unlike a real backtest,
+  // needs no walk-forward history, so a symbol added yesterday shows up here
+  // immediately.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .calendarEdge()
+      .then((res) => !cancelled && setCalendarEdgeRows(res.rows))
+      .catch(() => !cancelled && setCalendarEdgeError("Failed to load calendar edge estimates."))
+      .finally(() => !cancelled && setCalendarEdgeLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [strikeSymbol, setStrikeSymbol] = useState("");
   const [strikeExpirations, setStrikeExpirations] = useState<ExpiryOption[]>([]);
@@ -210,6 +229,11 @@ export default function ScannerPage() {
     [data]
   );
 
+  const calendarEdgeBarRows: VolBarRow[] = useMemo(
+    () => calendarEdgeRows.map((r) => ({ symbol: r.symbol, color: r.color, value: r.net_vega_pnl })),
+    [calendarEdgeRows]
+  );
+
   return (
     <>
       <SiteHeader title="Vol Scanner" />
@@ -245,21 +269,21 @@ export default function ScannerPage() {
                 />
               </ChartCard>
               <ChartCard
-                title="Call IV vs Put IV"
-                hint="Each dot is one symbol's 25-delta call and put IV at the expiration selected below. Same comparison as Skew Bias -- above the line, puts are priced richer than calls; below, calls are richer. Only symbols that actually list this expiration appear."
+                title="Put/Call Ratio"
+                hint="Total put open interest divided by total call open interest, summed across every strike at the expiration selected below -- a positioning read, not a pricing one. Above 1: more puts than calls held open (skews defensive/bearish). Below 1: more calls (skews speculative/bullish). Only symbols that actually list this expiration, with open interest on both sides, appear."
               >
                 <div className="mb-3 flex items-center justify-end gap-2">
                   <Label className="text-xs text-muted-foreground">Expiration</Label>
                   <Select
-                    value={wingExpiration}
-                    onValueChange={setWingExpiration}
-                    disabled={wingExpirations.length === 0}
+                    value={pcrExpiration}
+                    onValueChange={setPcrExpiration}
+                    disabled={pcrExpirations.length === 0}
                   >
                     <SelectTrigger size="sm" className="w-44">
                       <SelectValue placeholder="Select expiration" />
                     </SelectTrigger>
                     <SelectContent>
-                      {wingExpirations.map((e) => (
+                      {pcrExpirations.map((e) => (
                         <SelectItem key={e.expiration} value={e.expiration}>
                           {fmtDate(e.expiration)} (DTE {e.dte})
                         </SelectItem>
@@ -267,17 +291,17 @@ export default function ScannerPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                {wingError && <p className="mb-2 text-xs text-destructive">{wingError}</p>}
-                {wingLoading ? (
+                {pcrError && <p className="mb-2 text-xs text-destructive">{pcrError}</p>}
+                {pcrLoading ? (
                   <Skeleton className="h-[300px] w-full" />
                 ) : (
-                  <VolScatterChart
-                    points={wingPoints}
-                    xLabel="Call IV (25Δ)"
-                    yLabel="Put IV (25Δ)"
-                    aboveLineMeans="puts richer"
-                    belowLineMeans="calls richer"
-                    emptyMessage="No symbols list this expiration with usable call/put wing IV."
+                  <VolBarChart
+                    rows={pcrRows}
+                    valueLabel="PCR"
+                    height={300}
+                    referenceValue={1}
+                    formatValue={(v) => fmtNum(v, 2)}
+                    emptyMessage="No symbols list this expiration with open interest on both sides."
                   />
                 )}
               </ChartCard>
@@ -360,6 +384,24 @@ export default function ScannerPage() {
                 <VolBarChart rows={vrpRows} valueLabel="VRP" emptyMessage="No symbols have both IV and realized vol yet." />
               </ChartCard>
             </div>
+            <ChartCard
+              title="Calendar Edge Leaderboard"
+              hint="Estimated dollar edge for a sell-front/buy-back-month 25Δ calendar call spread (~7 DTE front, ~30 DTE back), ranked. This is a MODELED estimate -- a forward-variance decomposition using each leg's real recorded IV and broker-supplied vega, not a guarantee or a backtested win rate. Needs no walk-forward history, so a symbol added yesterday still shows up here; for a real (if short) track record of an actual trade, run it on the Backtest page."
+              className="mb-4"
+            >
+              {calendarEdgeError && <p className="mb-2 text-xs text-destructive">{calendarEdgeError}</p>}
+              {calendarEdgeLoading ? (
+                <Skeleton className="h-64 w-full" />
+              ) : (
+                <VolBarChart
+                  rows={calendarEdgeBarRows}
+                  valueLabel="Modeled edge"
+                  referenceValue={0}
+                  formatValue={(v) => `$${fmtNum(v, 0)}`}
+                  emptyMessage="No symbol currently shows a measurable calendar edge."
+                />
+              )}
+            </ChartCard>
             <ChartCard title="Vol Scanner" bodyClassName="p-0">
             <Table>
               <TableHeader>

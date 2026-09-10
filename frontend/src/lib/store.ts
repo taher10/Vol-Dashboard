@@ -41,9 +41,13 @@ export const useSettingsStore = create<SettingsState>()(
           : [...current, symbol];
         set({ symbols: next.length ? next : ["SPX"] });
       },
+      // Adds `symbol` to the tracked list if it isn't already there -- lets a
+      // direct/deep-link navigation (e.g. typing /backtest/AAPL in the URL
+      // bar) make AAPL primary even if it was never explicitly toggled on
+      // via the picker, instead of silently no-op'ing.
       setPrimary: (symbol) => {
         const current = get().symbols;
-        if (!current.includes(symbol) || current[0] === symbol) return;
+        if (current[0] === symbol) return;
         set({ symbols: [symbol, ...current.filter((s) => s !== symbol)] });
       },
       setDteRange: (dteRange) => set({ dteRange }),

@@ -52,6 +52,13 @@ class Leg:
     strike: float
     delta: float | None
     mid: float
+    # Only set for multi-expiration structures (currently just the calendar
+    # spread) -- every other structure's legs all share their Candidate's own
+    # single `expiration`, so this stays None for them and every existing
+    # call site is unaffected.
+    expiration: pd.Timestamp | None = None
+    implied_volatility: float | None = None
+    vega: float | None = None
 
 
 CONTRACT_MULTIPLIER = 100  # standard equity/index option contract size
@@ -72,11 +79,18 @@ class Candidate:
     dte: int
     legs: list[Leg]
     net_debit_credit: float
-    max_profit: float
-    max_loss: float
+    # None for structures where expiration-intrinsic-value math would be
+    # outright wrong (currently just the calendar spread -- its long leg
+    # still has real time value at the short leg's expiration, which plain
+    # intrinsic value throws away). Every other structure always sets these.
+    max_profit: float | None
+    max_loss: float | None
     breakevens: list[float]
-    approx_pop: float
+    approx_pop: float | None
     payoff: list[dict] = field(default_factory=list)
+    # Calendar-only: the forward-variance IV-crush edge estimate (see
+    # calendar_variance_edge()). None for every other structure.
+    variance_edge: dict | None = None
 
 
 def _mid(row: pd.Series) -> float:
@@ -389,6 +403,130 @@ def build_covered_call(
         breakevens=[breakeven],
         approx_pop=approx_pop,
         payoff=payoff,
+    )
+
+
+def calendar_variance_edge(
+    front_iv: float,
+    front_dte: int,
+    front_vega: float,
+    back_iv: float,
+    back_dte: int,
+    back_vega: float,
+) -> dict | None:
+    """
+    Forward-variance decomposition for a sell-front/buy-back-month calendar:
+    isolates the "event" variance inflating the front-month leg's IV more
+    than the back-month leg's (concentrated into fewer days), and estimates
+    each leg's expected IV crush toward that shared post-event baseline
+    (`iv_ex`). Real broker-supplied vega ($ per 1 IV point, e.g. Schwab's
+    `vega` field -- already recorded per contract) turns each leg's expected
+    crush into a dollar P&L estimate. This is a transparent, documented
+    heuristic (assumes the same absolute event-variance lands in both
+    expirations' IV) -- not a full option-pricing simulation, and not a
+    guarantee, just an estimate of the trade's structural edge.
+
+    IV_ex = sqrt[(IV_back^2*DTE_back - IV_front^2*DTE_front) / (DTE_back-DTE_front)]
+
+    Returns None if there's no front/back ordering to decompose
+    (front_dte >= back_dte) or if the term under the sqrt goes negative --
+    the front leg isn't actually inflated relative to the back leg, so this
+    formula has no measurable edge to report (not an error, just "no
+    signal").
+    """
+    if front_dte >= back_dte:
+        return None
+    variance_term = (back_iv**2 * back_dte - front_iv**2 * front_dte) / (back_dte - front_dte)
+    if variance_term < 0:
+        return None
+    iv_ex = variance_term**0.5
+
+    front_crush = front_iv - iv_ex
+    back_crush = back_iv - iv_ex
+    # Short the front leg: an IV drop (positive front_crush) is a profit.
+    # Long the back leg: an IV drop (positive back_crush) is a loss.
+    front_vega_pnl = front_vega * front_crush * CONTRACT_MULTIPLIER
+    back_vega_pnl = -back_vega * back_crush * CONTRACT_MULTIPLIER
+    return {
+        "iv_ex": iv_ex,
+        "front_crush": front_crush,
+        "back_crush": back_crush,
+        "front_vega_pnl": front_vega_pnl,
+        "back_vega_pnl": back_vega_pnl,
+        "net_vega_pnl": front_vega_pnl + back_vega_pnl,
+    }
+
+
+def build_calendar_call(
+    chain: pd.DataFrame,
+    front_expiration: pd.Timestamp,
+    back_expiration: pd.Timestamp,
+    target_delta: float = 0.25,
+) -> Candidate | None:
+    """
+    Sell a front-month call near `target_delta`, buy the same-delta call on a
+    later `back_expiration` -- a classic pre-event calendar, structured to
+    profit if the front leg's (typically event-inflated) IV crushes faster
+    than the back leg's. Each leg is picked independently on its own
+    expiration's chain slice (not pinned to the same strike), matching how a
+    trader actually screens this: same delta, whatever strike that lands on
+    each month.
+
+    Deliberately does NOT compute max_profit/max_loss/breakevens/payoff via
+    _summarize()'s intrinsic-value math -- that's only correct when every
+    leg expires together, and the back leg here still has real time value at
+    front_expiration. Returns those as None/empty instead of a wrong number.
+    `variance_edge` (calendar_variance_edge()) is the real edge estimate for
+    this structure. Returns None if either expiration's chain can't support
+    a call near target_delta.
+    """
+    front_chain = chain[chain["expiration"] == front_expiration].dropna(
+        subset=["delta", "bid", "ask", "strikePrice", "impliedVolatility", "vega"]
+    )
+    back_chain = chain[chain["expiration"] == back_expiration].dropna(
+        subset=["delta", "bid", "ask", "strikePrice", "impliedVolatility", "vega"]
+    )
+    if front_chain.empty or back_chain.empty:
+        return None
+
+    front_row = _nearest_to_delta(front_chain, "CALL", target_delta)
+    back_row = _nearest_to_delta(back_chain, "CALL", target_delta)
+    if front_row is None or back_row is None:
+        return None
+
+    front_dte = int(front_row["dte"])
+    back_dte = int(back_row["dte"])
+    front_iv = float(front_row["impliedVolatility"])
+    back_iv = float(back_row["impliedVolatility"])
+    front_vega = float(front_row["vega"])
+    back_vega = float(back_row["vega"])
+    front_mid = _mid(front_row)
+    back_mid = _mid(back_row)
+
+    legs = [
+        Leg(
+            "sell", "CALL", float(front_row["strikePrice"]), float(front_row["delta"]), front_mid,
+            expiration=front_expiration, implied_volatility=front_iv, vega=front_vega,
+        ),
+        Leg(
+            "buy", "CALL", float(back_row["strikePrice"]), float(back_row["delta"]), back_mid,
+            expiration=back_expiration, implied_volatility=back_iv, vega=back_vega,
+        ),
+    ]
+
+    return Candidate(
+        structure="Calendar Call Spread",
+        direction="neutral",
+        expiration=front_expiration,
+        dte=front_dte,
+        legs=legs,
+        net_debit_credit=(back_mid - front_mid) * CONTRACT_MULTIPLIER,
+        max_profit=None,
+        max_loss=None,
+        breakevens=[],
+        approx_pop=None,
+        payoff=[],
+        variance_edge=calendar_variance_edge(front_iv, front_dte, front_vega, back_iv, back_dte, back_vega),
     )
 
 

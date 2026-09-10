@@ -51,6 +51,15 @@ async function apiPost<T>(path: string, params?: Record<string, string | number 
   return handleResponse<T>(res);
 }
 
+async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(buildUrl(path).toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return handleResponse<T>(res);
+}
+
 // ---------------------------------------------------------------------------
 // Types (mirror src/api/routes.py + src/api/schemas.py)
 // ---------------------------------------------------------------------------
@@ -58,6 +67,15 @@ async function apiPost<T>(path: string, params?: Record<string, string | number 
 export interface SymbolInfo {
   symbol: string;
   color: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatResponse {
+  reply: string;
 }
 
 export interface TermStructurePoint {
@@ -163,6 +181,12 @@ export interface StrategyLeg {
   strike: number;
   delta: number | null;
   mid: number;
+  /** Only set for calendar_call's legs (its two legs expire on different
+   * dates) -- null for every other structure, which shares one expiration
+   * at the StrategyCandidate level. */
+  expiration: string | null;
+  implied_volatility: number | null;
+  vega: number | null;
 }
 
 export interface PayoffPoint {
@@ -170,18 +194,35 @@ export interface PayoffPoint {
   pnl: number;
 }
 
+/** The forward-variance IV-crush edge estimate for a calendar spread (see
+ * calendar_variance_edge() in strategy_engine.py) -- a modeled estimate
+ * using real broker-supplied vega, not a guarantee. */
+export interface VarianceEdge {
+  iv_ex: number;
+  front_crush: number;
+  back_crush: number;
+  front_vega_pnl: number;
+  back_vega_pnl: number;
+  net_vega_pnl: number;
+}
+
 export interface StrategyCandidate {
   structure: string;
-  direction: "bullish" | "bearish";
+  direction: "bullish" | "bearish" | "neutral";
   expiration: string;
   dte: number;
   legs: StrategyLeg[];
   net_debit_credit: number;
-  max_profit: number;
-  max_loss: number;
+  /** Null for calendar_call -- expiration-intrinsic-value math would be
+   * wrong for it (its long leg still has real time value at the short
+   * leg's expiration). Every other structure always sets these. */
+  max_profit: number | null;
+  max_loss: number | null;
   breakevens: number[];
-  approx_pop: number;
+  approx_pop: number | null;
   payoff: PayoffPoint[];
+  /** Calendar-only edge estimate; null for every other structure. */
+  variance_edge: VarianceEdge | null;
 }
 
 export interface PositionSizing {
@@ -268,17 +309,35 @@ export interface ScannerResponse {
   rows: ScannerRow[];
 }
 
-export interface WingIvRow {
+export interface CalendarEdgeRow {
   symbol: string;
   color: string;
-  iv_25c: number;
-  iv_25p: number;
+  front_expiration: string;
+  back_expiration: string;
+  front_dte: number;
+  back_dte: number;
+  net_vega_pnl: number;
 }
 
-export interface WingIvResponse {
+export interface CalendarEdgeResponse {
+  front_dte: number;
+  back_dte: number;
+  target_delta: number;
+  rows: CalendarEdgeRow[];
+}
+
+export interface PcrRow {
+  symbol: string;
+  color: string;
+  put_oi: number;
+  call_oi: number;
+  pcr: number;
+}
+
+export interface PcrResponse {
   expiration: string | null;
   available_expirations: ExpiryOption[];
-  rows: WingIvRow[];
+  rows: PcrRow[];
 }
 
 export interface StrikeProfileRow {
@@ -364,22 +423,64 @@ export interface BacktestResult {
   summary: string;
 }
 
+export type BacktestStructure =
+  | "bull_call"
+  | "bull_put"
+  | "bear_call"
+  | "bear_put"
+  | "cash_secured_put"
+  | "covered_call"
+  | "calendar_call";
+
+/** Every structure backtestable end to end, in the order shown in pickers --
+ * verticals first (grouped bullish/bearish), then the two single-leg
+ * structures, then the calendar. Shared by the primary and comparison-mode
+ * pickers. */
+export const BACKTEST_STRUCTURES: { value: BacktestStructure; label: string }[] = [
+  { value: "bull_call", label: "Bull Call Spread" },
+  { value: "bull_put", label: "Bull Put Spread" },
+  { value: "bear_call", label: "Bear Call Spread" },
+  { value: "bear_put", label: "Bear Put Spread" },
+  { value: "cash_secured_put", label: "Cash Secured Put" },
+  { value: "covered_call", label: "Covered Call" },
+  { value: "calendar_call", label: "Calendar Call Spread" },
+];
+
+/** Verticals take a width (# strikes between the two legs); the single-leg
+ * structures and the calendar (which has its own back-month expiration
+ * control instead) don't. */
+export function structureHasWidth(structure: BacktestStructure): boolean {
+  return structure !== "cash_secured_put" && structure !== "covered_call" && structure !== "calendar_call";
+}
+
+/** The calendar is the only structure whose two legs expire on different
+ * dates -- it needs its own back-month expiration picker instead of the
+ * width control every other structure uses. */
+export function structureIsCalendar(structure: BacktestStructure): boolean {
+  return structure === "calendar_call";
+}
+
 export interface BacktestRunResponse {
   symbol: string;
   entry_date: string;
   expiration: string;
-  direction: "bullish" | "bearish";
-  risk: "conservative" | "moderate" | "aggressive";
+  structure: BacktestStructure;
+  target_delta: number;
+  width_strikes: number;
+  back_expiration: string | null;
   result: BacktestResult | null;
-  /** Set (with `result: null`) when no vertical could be built for this date/expiration/direction/risk combination. */
+  /** Set (with `result: null`) when no such structure could be built for this date/expiration/delta/width combination. */
   error: string | null;
 }
 
 export interface BacktestRunParams {
   entryDate: string;
   expiration: string;
-  direction: "bullish" | "bearish";
-  risk: "conservative" | "moderate" | "aggressive";
+  structure: BacktestStructure;
+  targetDelta: number;
+  widthStrikes: number;
+  /** Required when structure is calendar_call, ignored otherwise. */
+  backExpiration?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -429,16 +530,24 @@ export const api = {
     apiGet<BacktestRunResponse>(`/api/backtest/${symbol}/run`, {
       entry_date: params.entryDate,
       expiration: params.expiration,
-      direction: params.direction,
-      risk: params.risk,
+      structure: params.structure,
+      target_delta: params.targetDelta,
+      width_strikes: params.widthStrikes,
+      back_expiration: params.backExpiration,
     }),
 
   scanner: (targetDte = 30) => apiGet<ScannerResponse>("/api/scanner", { target_dte: targetDte }),
 
-  scannerWingIv: (expiration?: string) => apiGet<WingIvResponse>("/api/scanner/wing-iv", { expiration }),
+  scannerPcr: (expiration?: string) => apiGet<PcrResponse>("/api/scanner/pcr", { expiration }),
+
+  calendarEdge: (frontDte = 7, backDte = 30) =>
+    apiGet<CalendarEdgeResponse>("/api/scanner/calendar-edge", { front_dte: frontDte, back_dte: backDte }),
 
   scannerStrikeProfile: (symbol: string, expiration?: string) =>
     apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),
 
   tradeIdeas: () => apiGet<TradeIdeasResponse>("/api/trade-ideas"),
+
+  chat: (message: string, history: ChatMessage[]) =>
+    apiPostJson<ChatResponse>("/api/chat", { message, history }),
 };

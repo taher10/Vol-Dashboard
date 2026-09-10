@@ -19,10 +19,12 @@ function CustomTooltip({
   active,
   payload,
   valueLabel,
+  formatValue,
 }: {
   active?: boolean;
   payload?: TooltipPayloadEntry[];
   valueLabel: string;
+  formatValue: (v: number) => string;
 }) {
   if (!active || !payload?.length) return null;
   const p = payload[0].payload;
@@ -34,7 +36,7 @@ function CustomTooltip({
       </div>
       <div className="flex items-center gap-2 text-muted-foreground">
         {valueLabel}
-        <span className="font-mono tabular-nums text-popover-foreground">{fmtSigned(p.value, 2)}</span>
+        <span className="font-mono tabular-nums text-popover-foreground">{formatValue(p.value)}</span>
       </div>
     </div>
   );
@@ -49,11 +51,18 @@ export function VolBarChart({
   valueLabel,
   height,
   emptyMessage = "No symbols have this data yet.",
+  referenceValue,
+  formatValue = (v) => fmtSigned(v, 2),
 }: {
   rows: VolBarRow[];
   valueLabel: string;
   height?: number;
   emptyMessage?: string;
+  /** Explicit reference line (e.g. PCR's parity point at 1) -- falls back to
+   * a 0-line only when the data itself goes negative (VRP/richness-style
+   * charts) if this isn't given. */
+  referenceValue?: number;
+  formatValue?: (v: number) => string;
 }) {
   if (rows.length === 0) {
     return (
@@ -66,6 +75,7 @@ export function VolBarChart({
   const sorted = [...rows].sort((a, b) => b.value - a.value);
   const chartHeight = height ?? Math.max(sorted.length * 26 + 24, 120);
   const hasNegative = sorted.some((r) => r.value < 0);
+  const lineAt = referenceValue ?? (hasNegative ? 0 : null);
 
   return (
     <ResponsiveContainer width="100%" height={chartHeight}>
@@ -79,8 +89,11 @@ export function VolBarChart({
           width={48}
           interval={0}
         />
-        <Tooltip content={<CustomTooltip valueLabel={valueLabel} />} cursor={{ fill: "rgba(0,0,0,0.03)" }} />
-        {hasNegative && <ReferenceLine x={0} stroke={COLOR_TEXT_MUTED} />}
+        <Tooltip
+          content={<CustomTooltip valueLabel={valueLabel} formatValue={formatValue} />}
+          cursor={{ fill: "rgba(0,0,0,0.03)" }}
+        />
+        {lineAt !== null && <ReferenceLine x={lineAt} stroke={COLOR_TEXT_MUTED} />}
         <Bar dataKey="value" isAnimationActive={false} radius={2}>
           {sorted.map((r) => (
             <Cell key={r.symbol} fill={r.color} />
