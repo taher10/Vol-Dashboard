@@ -31,23 +31,35 @@ export function PayoffChart({
   breakevens,
   spot,
   height = 280,
+  xDomain,
+  yDomain,
+  emptyMessage = "No payoff data",
 }: {
   payoff: PayoffPoint[];
   breakevens: number[];
   spot?: number | null;
   height?: number;
+  /** Shared axis domains -- pass these in compare mode so two structures'
+   * payoff charts sit on identical scales and stay honestly comparable;
+   * omit for the default per-chart auto-fit behavior. */
+  xDomain?: [number, number];
+  yDomain?: [number, number];
+  /** Override the empty-state copy -- e.g. calendars always have an empty
+   * payoff array (deliberately not modeled), which reads better as an
+   * explanation than a bare "No payoff data". */
+  emptyMessage?: string;
 }) {
   if (payoff.length === 0) {
     return (
-      <div className="flex items-center justify-center text-sm text-muted-foreground" style={{ height }}>
-        No payoff data
+      <div className="flex items-center justify-center px-6 text-center text-sm text-muted-foreground" style={{ height }}>
+        {emptyMessage}
       </div>
     );
   }
 
   const values = payoff.map((p) => p.pnl);
-  const minY = Math.min(...values);
-  const maxY = Math.max(...values);
+  const minY = yDomain ? yDomain[0] : Math.min(...values);
+  const maxY = yDomain ? yDomain[1] : Math.max(...values);
   // Fraction of the gradient's top-to-bottom span (y1=0 -> maxY, y2=1 -> minY)
   // at which P/L crosses zero, so the fill can split green above / red below
   // the actual zero line rather than the chart's visual midpoint.
@@ -66,7 +78,7 @@ export function PayoffChart({
         <XAxis
           dataKey="underlying"
           type="number"
-          domain={["dataMin", "dataMax"]}
+          domain={xDomain ?? ["dataMin", "dataMax"]}
           tick={{ fontSize: 11, fill: COLOR_TEXT_MUTED }}
           tickFormatter={(v: number) => fmtNum(v, 0)}
           label={{
@@ -79,7 +91,9 @@ export function PayoffChart({
         />
         <YAxis
           dataKey="pnl"
+          domain={yDomain ?? ["auto", "auto"]}
           tick={{ fontSize: 11, fill: COLOR_TEXT_MUTED }}
+          tickFormatter={(v: number) => fmtNum(v, 0)}
           width={52}
           label={{ value: "P/L", angle: -90, position: "insideLeft", fontSize: 11, fill: COLOR_TEXT_MUTED }}
         />

@@ -28,6 +28,14 @@ export function fmtDateTime(iso: string | null | undefined): string {
   return d.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
 }
 
+/** Contract-scaled dollar figures (max profit/loss, net debit/credit) run
+ * into the thousands even for a single spread -- comma-separate them so
+ * e.g. "742776.00" reads as "742,776.00" instead of looking like a typo. */
+export function fmtUsd(v: number | null | undefined, digits = 2): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return v.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
 export function fmtInt(v: number | null | undefined): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   return Math.round(v).toLocaleString("en-US");

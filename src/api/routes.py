@@ -243,36 +243,35 @@ def scanner(target_dte: int = Query(30, ge=0, le=3650)) -> dict:
     return {"target_dte": target_dte, "rows": [_scanner_row(sym, target_dte) for sym in SYMBOL_REGISTRY]}
 
 
-def _wing_iv_snapshot(expiration: str | None) -> dict:
-    """Call/Put 25-delta IV for every symbol that literally lists
-    `expiration` (a YYYY-MM-DD date string) in its own chain, for the Vol
-    Scanner's Call IV vs Put IV chart. Deliberately reads each symbol's full
-    per-expiration skew table (bundle.metrics["skew"]) instead of
-    _scanner_row()'s single nearest-to-target-dte row -- that row is a
-    different, symbol-specific expiration for nearly every symbol (a 30 DTE
-    pick for AAPL isn't the same calendar date as a 30 DTE pick for TSLA),
-    which would make a "same expiration across tickers" comparison
-    meaningless. A symbol that doesn't have this exact expiration (or
-    couldn't interpolate 25-delta IV for it) is simply absent from `rows`,
-    not included with nulls -- there's no "no signal yet" case here the way
-    there is for richness_z, it's just a calendar mismatch."""
+def _pcr_snapshot(expiration: str | None) -> dict:
+    """Put/Call open-interest ratio (total put OI / total call OI, summed
+    across every strike at one expiration) for every symbol that literally
+    lists `expiration` (a YYYY-MM-DD date string) in its own chain, for the
+    Vol Scanner's PCR chart. Deliberately sums the WHOLE chain at that
+    expiration, not just the 25-delta wings -- PCR is a positioning/sentiment
+    read (who's holding what), not a smile-shape read, so it wants every
+    strike's open interest, not just the wing points build_vertical() itself
+    trades off of. A symbol with no open interest at all on the call side
+    (can't form a ratio) is simply absent from `rows`, matching the same
+    "calendar/data mismatch, not a signal" convention _wing_iv_snapshot used
+    to follow for this same chart's expiration selector."""
     all_expirations: dict[str, int] = {}
-    per_symbol_valid: dict[str, pd.DataFrame] = {}
+    per_symbol_chain: dict[str, pd.DataFrame] = {}
     for symbol in SYMBOL_REGISTRY:
         try:
             bundle = data_loader.load_latest_snapshot(symbol)
         except FileNotFoundError:
             continue
-        skew_df = bundle.metrics.get("skew")
-        if skew_df is None or skew_df.empty:
+        chain = bundle.chain
+        if chain is None or chain.empty:
             continue
-        valid = skew_df.dropna(subset=["iv_25p", "iv_25c"]).copy()
-        if valid.empty:
+        chain = chain.dropna(subset=["expiration", "dte", "optionType", "openInterest"]).copy()
+        if chain.empty:
             continue
-        valid["expiration_str"] = valid["expiration"].apply(lambda e: pd.Timestamp(e).date().isoformat())
-        per_symbol_valid[symbol] = valid
-        for _, r in valid.iterrows():
-            all_expirations.setdefault(r["expiration_str"], int(r["dte"]))
+        chain["expiration_str"] = chain["expiration"].apply(lambda e: pd.Timestamp(e).date().isoformat())
+        per_symbol_chain[symbol] = chain
+        for exp_str, dte in chain[["expiration_str", "dte"]].drop_duplicates().itertuples(index=False):
+            all_expirations.setdefault(exp_str, int(dte))
 
     available_expirations = [{"expiration": exp, "dte": dte} for exp, dte in sorted(all_expirations.items())]
 
@@ -281,24 +280,85 @@ def _wing_iv_snapshot(expiration: str | None) -> dict:
 
     rows: list[dict] = []
     if expiration:
-        for symbol, valid in per_symbol_valid.items():
-            match = valid[valid["expiration_str"] == expiration]
-            if match.empty:
+        for symbol, chain in per_symbol_chain.items():
+            exp_chain = chain[chain["expiration_str"] == expiration]
+            if exp_chain.empty:
                 continue
-            r = match.iloc[0]
+            put_oi = float(exp_chain.loc[exp_chain["optionType"] == "PUT", "openInterest"].sum())
+            call_oi = float(exp_chain.loc[exp_chain["optionType"] == "CALL", "openInterest"].sum())
+            if call_oi <= 0:
+                continue
             rows.append({
                 "symbol": symbol,
                 "color": SYMBOL_REGISTRY[symbol].color,
-                "iv_25c": clean_value(r["iv_25c"]),
-                "iv_25p": clean_value(r["iv_25p"]),
+                "put_oi": int(put_oi),
+                "call_oi": int(call_oi),
+                "pcr": clean_value(put_oi / call_oi),
             })
 
     return {"expiration": expiration, "available_expirations": available_expirations, "rows": rows}
 
 
-@router.get("/scanner/wing-iv")
-def scanner_wing_iv(expiration: str | None = Query(None)) -> dict:
-    return _wing_iv_snapshot(expiration)
+@router.get("/scanner/pcr")
+def scanner_pcr(expiration: str | None = Query(None)) -> dict:
+    return _pcr_snapshot(expiration)
+
+
+def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta: float) -> dict | None:
+    """One symbol's calendar-edge estimate for the Vol Scanner's leaderboard
+    -- picks this symbol's own nearest-available expirations to
+    front_dte/back_dte, then reuses strategy_engine.build_calendar_call()
+    directly (same picking logic a real calendar backtest entry would use,
+    zero duplication) to get its variance_edge. Returns None (skipped by the
+    caller) for a symbol with no saved snapshot yet, fewer than two distinct
+    expirations, or where build_calendar_call() finds no signal -- never
+    raises, same "report gaps, don't hide them" spirit as _scanner_row()."""
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return None
+
+    chain = bundle.chain
+    if chain is None or chain.empty or "expiration" not in chain.columns:
+        return None
+
+    dte_table = chain[["expiration", "dte"]].dropna().drop_duplicates().sort_values("dte")
+    if dte_table.empty:
+        return None
+    front_idx = (dte_table["dte"] - front_dte).abs().idxmin()
+    back_idx = (dte_table["dte"] - back_dte).abs().idxmin()
+    front_expiration = dte_table.loc[front_idx, "expiration"]
+    back_expiration = dte_table.loc[back_idx, "expiration"]
+    if front_expiration == back_expiration:
+        return None
+
+    candidate = strategy_engine.build_calendar_call(chain, front_expiration, back_expiration, target_delta)
+    if candidate is None or candidate.variance_edge is None:
+        return None
+
+    return {
+        "symbol": symbol,
+        "color": SYMBOL_REGISTRY[symbol].color,
+        "front_expiration": pd.Timestamp(front_expiration).date().isoformat(),
+        "back_expiration": pd.Timestamp(back_expiration).date().isoformat(),
+        "front_dte": int(dte_table.loc[front_idx, "dte"]),
+        "back_dte": int(dte_table.loc[back_idx, "dte"]),
+        "net_vega_pnl": clean_value(candidate.variance_edge["net_vega_pnl"]),
+    }
+
+
+@router.get("/scanner/calendar-edge")
+def scanner_calendar_edge(
+    front_dte: int = Query(7, ge=0, le=3650),
+    back_dte: int = Query(30, ge=0, le=3650),
+    target_delta: float = Query(0.25, gt=0.0, lt=0.5),
+) -> dict:
+    rows = [
+        row
+        for symbol in SYMBOL_REGISTRY
+        if (row := _calendar_edge_row(symbol, front_dte, back_dte, target_delta)) is not None
+    ]
+    return {"front_dte": front_dte, "back_dte": back_dte, "target_delta": target_delta, "rows": rows}
 
 
 def _strike_profile_snapshot(symbol: str, expiration: str | None) -> dict:
@@ -497,6 +557,11 @@ def _leg_record(leg: strategy_engine.Leg) -> dict:
         "strike": clean_value(leg.strike),
         "delta": clean_value(leg.delta),
         "mid": clean_value(leg.mid),
+        # Only set for calendar_call's legs -- None for every other
+        # structure, which shares one expiration at the Candidate level.
+        "expiration": pd.Timestamp(leg.expiration).date().isoformat() if leg.expiration is not None else None,
+        "implied_volatility": clean_value(leg.implied_volatility),
+        "vega": clean_value(leg.vega),
     }
 
 
@@ -518,6 +583,9 @@ def _candidate_record(c: strategy_engine.Candidate) -> dict:
         "breakevens": [clean_value(b) for b in c.breakevens],
         "approx_pop": clean_value(c.approx_pop),
         "payoff": [{"underlying": clean_value(p["underlying"]), "pnl": clean_value(p["pnl"])} for p in c.payoff],
+        "variance_edge": (
+            {k: clean_value(v) for k, v in c.variance_edge.items()} if c.variance_edge is not None else None
+        ),
     }
 
 
@@ -905,14 +973,19 @@ def backtest_run(
     symbol: str,
     entry_date: str = Query(..., description="ISO date, must be a recorded snapshot date"),
     expiration: str = Query(..., description="ISO date"),
-    direction: Literal["bullish", "bearish"] = Query(...),
-    risk: Literal["conservative", "moderate", "aggressive"] = Query(...),
+    structure: backtest_engine.StructureChoice = Query(...),
+    target_delta: float = Query(0.30, gt=0.0, lt=0.5),
+    width_strikes: int = Query(2, ge=1, le=5),
+    back_expiration: str | None = Query(None, description="ISO date, required for calendar_call"),
 ) -> dict:
     symbol = symbol.upper()
     if symbol not in SYMBOL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
+    if structure == "calendar_call" and not back_expiration:
+        raise HTTPException(status_code=400, detail="back_expiration is required for calendar_call.")
     entry_parsed = _parse_date(entry_date, label="entry date").date()
     expiration_parsed = _parse_date(expiration, label="expiration date")
+    back_expiration_parsed = _parse_date(back_expiration, label="back expiration date") if back_expiration else None
 
     raw_entry = _schwab_db.options_snapshot(symbol, entry_parsed)
     if raw_entry.empty:
@@ -920,19 +993,30 @@ def backtest_run(
     entry_chain = backtest_engine.adapt_historical_chain(raw_entry)
 
     snapshots = _history_snapshots(symbol, entry_parsed)
-    result = backtest_engine.run_backtest(entry_parsed, entry_chain, snapshots, expiration_parsed, direction, risk)
+    result = backtest_engine.run_backtest(
+        entry_parsed,
+        entry_chain,
+        snapshots,
+        expiration_parsed,
+        structure,
+        target_delta,
+        width_strikes,
+        back_expiration_parsed,
+    )
 
     if result is None:
         return {
             "symbol": symbol,
             "entry_date": entry_date,
             "expiration": expiration,
-            "direction": direction,
-            "risk": risk,
+            "structure": structure,
+            "target_delta": target_delta,
+            "width_strikes": width_strikes,
+            "back_expiration": back_expiration,
             "result": None,
             "error": (
-                f"Couldn't build a {risk} {direction} spread for {symbol} on {entry_date} at this expiration -- "
-                "try a different date, expiration, or risk profile."
+                f"Couldn't build a {structure.replace('_', ' ')} for {symbol} on {entry_date} at this expiration -- "
+                "try a different date, expiration, delta, or width."
             ),
         }
 
@@ -940,8 +1024,10 @@ def backtest_run(
         "symbol": symbol,
         "entry_date": entry_date,
         "expiration": expiration,
-        "direction": direction,
-        "risk": risk,
+        "structure": structure,
+        "target_delta": target_delta,
+        "width_strikes": width_strikes,
+        "back_expiration": back_expiration,
         "result": _backtest_result_record(result),
         "error": None,
     }

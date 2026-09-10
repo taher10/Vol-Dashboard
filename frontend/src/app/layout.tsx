@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
 import { AppSidebar } from "@/components/app-sidebar";
+import { ChatPanel } from "@/components/chat-panel";
 import { SymbolRouteSync } from "@/components/symbol-route-sync";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -38,6 +39,7 @@ export default function RootLayout({
             <AppSidebar />
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
           </div>
+          <ChatPanel />
         </TooltipProvider>
       </body>
     </html>

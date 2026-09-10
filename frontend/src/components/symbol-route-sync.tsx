@@ -61,5 +61,22 @@ export function SymbolRouteSync() {
     }
   }, [primary, pathname, router, hydrated]);
 
+  // The other direction: arriving at a symbol-scoped URL directly (a typed
+  // link, bookmark, or Vol Scanner/Trade Ideas row linking into e.g.
+  // /backtest/AAPL) previously left the sidebar picker showing whatever
+  // symbol was already primary -- confirmed confusing, since the page's own
+  // data was correct but the picker beside it silently disagreed. A plain
+  // ticker-shaped URL segment adopts the primary symbol to match.
+  useEffect(() => {
+    if (!hydrated) return;
+    const base = SYMBOL_SCOPED_BASES.find((b) => pathname === b || pathname.startsWith(`${b}/`));
+    if (!base) return;
+    const urlSymbol = pathname.slice(base.length + 1).split("/")[0]?.toUpperCase();
+    if (urlSymbol && /^[A-Z]{1,6}$/.test(urlSymbol) && urlSymbol !== primary) {
+      prevPrimary.current = urlSymbol;
+      useSettingsStore.getState().setPrimary(urlSymbol);
+    }
+  }, [pathname, hydrated, primary]);
+
   return null;
 }

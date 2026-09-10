@@ -193,7 +193,7 @@ export default function StrategyBuilderPage() {
                   capital != null && (
                     <p className="text-xs text-muted-foreground">
                       {`$${fmtNum(capital, 0)} isn't enough to cover even 1 contract of this trade (max loss $${fmtNum(
-                        rec.max_loss * 100,
+                        (rec.max_loss ?? 0) * 100,
                         0
                       )}/contract) — try a smaller symbol, a narrower risk profile, or more capital.`}
                     </p>
