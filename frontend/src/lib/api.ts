@@ -316,7 +316,55 @@ export interface CalendarEdgeRow {
   back_expiration: string;
   front_dte: number;
   back_dte: number;
+  /** Net debit paid to open one contract -- the real capital required. */
+  net_debit_credit: number | null;
+  /** A genuine worst-case upper bound (real math off the strikes/premium,
+   * not a fabricated number) -- conservatively ignores the back leg's
+   * remaining time value, so the real worst case is typically a bit lower. */
+  est_max_loss: number | null;
   net_vega_pnl: number;
+  /** Modeled edge as a % of capital required -- a more comparable ranking
+   * than the raw dollar edge alone. Null when est_max_loss is 0/unavailable. */
+  edge_per_capital_pct: number | null;
+}
+
+export interface DeltaNeutralRow {
+  symbol: string;
+  color: string;
+  expiration: string;
+  dte: number;
+  richness_z: number;
+  richness_label: string | null;
+  action: "buy" | "sell";
+  candidate: StrategyCandidate;
+}
+
+export interface DeltaNeutralResponse {
+  target_dte: number;
+  target_delta: number;
+  rows: DeltaNeutralRow[];
+}
+
+export interface TermStructureRow {
+  symbol: string;
+  color: string;
+  near_dte: number;
+  far_dte: number;
+  near_iv: number;
+  far_iv: number;
+  /** far_iv - near_iv -- positive = normal/contango, negative = inverted. */
+  iv_slope: number;
+  near_skew: number;
+  far_skew: number;
+  /** far_skew - near_skew -- whether downside skew gets more or less
+   * pronounced further out. */
+  skew_slope: number;
+}
+
+export interface TermStructureResponse {
+  near_dte: number;
+  far_dte: number;
+  rows: TermStructureRow[];
 }
 
 export interface CalendarEdgeResponse {
@@ -542,6 +590,12 @@ export const api = {
 
   calendarEdge: (frontDte = 7, backDte = 30) =>
     apiGet<CalendarEdgeResponse>("/api/scanner/calendar-edge", { front_dte: frontDte, back_dte: backDte }),
+
+  deltaNeutral: (targetDte = 30, targetDelta = 0.5) =>
+    apiGet<DeltaNeutralResponse>("/api/scanner/delta-neutral", { target_dte: targetDte, target_delta: targetDelta }),
+
+  termStructure: (nearDte = 7, farDte = 60) =>
+    apiGet<TermStructureResponse>("/api/scanner/term-structure", { near_dte: nearDte, far_dte: farDte }),
 
   scannerStrikeProfile: (symbol: string, expiration?: string) =>
     apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),

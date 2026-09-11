@@ -110,17 +110,22 @@ class OptionsVolJob:
         """
         Execute the full daily pipeline:
           authenticate → fetch chain → save raw →
+          fetch price history → save raw →
           compute all metrics → save metrics.
 
-        Deliberately options-only: this used to also fetch 1yr daily price
-        history per symbol (1 extra API call/symbol/day) to compute VRP
-        (realized vol vs. implied). Removed by request -- stock/price data is
-        readily available elsewhere, options-chain coverage across more
-        symbols is the priority, and every extra call here is one fewer
-        available for options coverage under the shared rate limiter (see
-        options_fetcher._SCHWAB_RATE_LIMITER). VRP is left NaN/unavailable
-        everywhere downstream (Overview/Drilldown already show a "needs price
-        history" message for exactly this case) rather than silently wrong.
+        Fetches 1yr daily price history per symbol (1 extra API call/symbol/
+        day, on top of the ~31 already spent on the options chain itself --
+        see options_fetcher._SCHWAB_RATE_LIMITER, self-throttled to 100
+        req/min against Schwab's real ~120/min) to compute VRP (realized vol
+        vs. implied). This was removed for a while to save budget for
+        options coverage across more symbols, then re-enabled once that
+        coverage was established -- the marginal cost turned out to be small
+        (~3% more calls for a 24-symbol run) relative to the value (VRP
+        Leaderboard / IV vs Realized Vol on Vol Scanner otherwise stay blank
+        for any symbol that's never had it). A price-history fetch failure
+        is non-fatal -- the chain snapshot still saves and every other
+        metric still computes; only vrp/realized_vol come back NaN for that
+        symbol that day, same degraded-not-broken behavior as before.
 
         Returns a dict of metrics DataFrames keyed by metric name.
         """
@@ -191,10 +196,22 @@ class OptionsVolJob:
         snapshot_date = datetime.now(UTC).date()
         self._db.append_options_snapshot(self.save_symbol, snapshot_date, chain)
 
-        # 4. Compute metrics (no price history -- see run()'s docstring;
-        # VRP comes back NaN/absent, everything else is unaffected)
+        # 3c. Price history for VRP (realized vol vs. implied) -- see run()'s
+        # docstring. Deliberately non-fatal: a transient Schwab hiccup here
+        # shouldn't lose the (already-usable) options snapshot above, just
+        # leave vrp/realized_vol NaN for today like the old options-only
+        # behavior did everywhere.
+        price_history: pd.DataFrame | None = None
+        try:
+            price_history = fetcher.fetch_price_history()
+            self._db.append_price_history(self.save_symbol, price_history)
+        except Exception:
+            logger.warning("Price history fetch failed for %s -- vrp/realized_vol will be NaN today.",
+                            self.save_symbol, exc_info=True)
+
+        # 4. Compute metrics
         logger.info("Computing volatility metrics ...")
-        vm = VolatilityMetrics(chain, price_history=None)
+        vm = VolatilityMetrics(chain, price_history=price_history)
         results = vm.compute_all(target_delta=self.target_delta, rv_window=self.rv_window)
 
         # 5. Persist metrics

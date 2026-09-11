@@ -360,6 +360,22 @@ def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta:
     if candidate is None or candidate.variance_edge is None:
         return None
 
+    net_debit_credit = candidate.net_debit_credit
+    # candidate.max_loss is already a genuine worst-case UPPER BOUND (see
+    # build_calendar_call()'s docstring) -- NOT "≈ net debit" the way an
+    # earlier version of this endpoint assumed, which was confirmed WRONG
+    # (not just imprecise) against a real OptionStrat quote once front/back
+    # strikes differ meaningfully. True max profit still has no honest
+    # simple number (open-ended, depends on where the stock lands and what
+    # IV does when the front leg expires) -- deliberately not included
+    # here, same reasoning as Candidate.max_profit=None.
+    est_max_loss = candidate.max_loss
+    edge_per_capital_pct = (
+        clean_value(candidate.variance_edge["net_vega_pnl"] / est_max_loss * 100)
+        if est_max_loss
+        else None
+    )
+
     return {
         "symbol": symbol,
         "color": SYMBOL_REGISTRY[symbol].color,
@@ -367,7 +383,10 @@ def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta:
         "back_expiration": pd.Timestamp(back_expiration).date().isoformat(),
         "front_dte": int(dte_table.loc[front_idx, "dte"]),
         "back_dte": int(dte_table.loc[back_idx, "dte"]),
+        "net_debit_credit": clean_value(net_debit_credit),
+        "est_max_loss": clean_value(est_max_loss),
         "net_vega_pnl": clean_value(candidate.variance_edge["net_vega_pnl"]),
+        "edge_per_capital_pct": edge_per_capital_pct,
     }
 
 
@@ -383,6 +402,130 @@ def scanner_calendar_edge(
         if (row := _calendar_edge_row(symbol, front_dte, back_dte, target_delta)) is not None
     ]
     return {"front_dte": front_dte, "back_dte": back_dte, "target_delta": target_delta, "rows": rows}
+
+
+def _delta_neutral_row(symbol: str, target_dte: int, target_delta: float) -> dict | None:
+    """One symbol's straddle/strangle screen -- reuses the SAME richness_z
+    signal already computed for the Vol Scanner table (decision_engine.
+    score_expiries(), same as _scanner_row()) to decide direction: rich
+    (richness_z > 0) -> sell candidate (collect the rich premium), cheap
+    (richness_z < 0) -> buy candidate (pay the cheap premium for a big-move
+    bet). Builds the actual structure via build_straddle_strangle() at that
+    same expiry -- real strikes/premiums, not just the ranking number.
+    Returns None (skipped by the caller) for a symbol with no snapshot yet,
+    no richness signal at this DTE, or where the chain can't support a
+    call+put near target_delta -- never raises."""
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return None
+
+    try:
+        expiry_scores = decision_engine.score_expiries(bundle.metrics, _iv_zscore_lookup(symbol, bundle.metrics))
+    except ValueError:
+        return None
+    if expiry_scores.empty:
+        return None
+
+    idx = (expiry_scores["dte"] - target_dte).abs().idxmin()
+    row = expiry_scores.loc[idx]
+    richness_z = row["richness_z"]
+    if pd.isna(richness_z):
+        return None
+
+    action: strategy_engine.Action = "sell" if richness_z > 0 else "buy"
+    candidate = strategy_engine.build_straddle_strangle(bundle.chain, row["expiration"], action, target_delta)
+    if candidate is None:
+        return None
+
+    return {
+        "symbol": symbol,
+        "color": SYMBOL_REGISTRY[symbol].color,
+        "expiration": pd.Timestamp(row["expiration"]).date().isoformat(),
+        "dte": int(row["dte"]),
+        "richness_z": clean_value(richness_z),
+        "richness_label": clean_value(row["richness_label"]),
+        "action": action,
+        "candidate": _candidate_record(candidate),
+    }
+
+
+@router.get("/scanner/delta-neutral")
+def scanner_delta_neutral(
+    target_dte: int = Query(30, ge=0, le=3650),
+    target_delta: float = Query(0.50, gt=0.0, le=0.50),
+) -> dict:
+    rows = [
+        row
+        for symbol in SYMBOL_REGISTRY
+        if (row := _delta_neutral_row(symbol, target_dte, target_delta)) is not None
+    ]
+    return {"target_dte": target_dte, "target_delta": target_delta, "rows": rows}
+
+
+def _term_structure_row(symbol: str, near_dte: int, far_dte: int) -> dict | None:
+    """One symbol's term-structure and skew-term-structure slope -- the
+    near/far ATM IV and skew read straight off metrics already computed by
+    VolatilityMetrics.atm_iv_term_structure()/delta_skew() (same tables
+    /api/overview serves), no new metric needed. iv_slope = far IV - near
+    IV (positive = normal/contango, negative = inverted); skew_slope =
+    far skew - near skew (does downside skew get more or less pronounced
+    further out). Returns None (skipped by the caller) for a symbol with no
+    snapshot yet or fewer than two usable DTE points in either table --
+    never raises, same "report gaps, don't hide them" spirit as
+    _scanner_row()."""
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return None
+
+    ts = bundle.metrics.get("term_structure")
+    skew_df = bundle.metrics.get("skew")
+    if ts is None or ts.empty or skew_df is None or skew_df.empty:
+        return None
+
+    ts = ts.dropna(subset=["dte", "atm_iv"])
+    skew_df = skew_df.dropna(subset=["dte", "skew"])
+    if len(ts) < 2 or len(skew_df) < 2:
+        return None
+
+    near_iv_idx = (ts["dte"] - near_dte).abs().idxmin()
+    far_iv_idx = (ts["dte"] - far_dte).abs().idxmin()
+    near_skew_idx = (skew_df["dte"] - near_dte).abs().idxmin()
+    far_skew_idx = (skew_df["dte"] - far_dte).abs().idxmin()
+    if near_iv_idx == far_iv_idx or near_skew_idx == far_skew_idx:
+        return None  # not enough distinct expirations to form a slope
+
+    near_iv = float(ts.loc[near_iv_idx, "atm_iv"])
+    far_iv = float(ts.loc[far_iv_idx, "atm_iv"])
+    near_skew = float(skew_df.loc[near_skew_idx, "skew"])
+    far_skew = float(skew_df.loc[far_skew_idx, "skew"])
+
+    return {
+        "symbol": symbol,
+        "color": SYMBOL_REGISTRY[symbol].color,
+        "near_dte": int(ts.loc[near_iv_idx, "dte"]),
+        "far_dte": int(ts.loc[far_iv_idx, "dte"]),
+        "near_iv": clean_value(near_iv),
+        "far_iv": clean_value(far_iv),
+        "iv_slope": clean_value(far_iv - near_iv),
+        "near_skew": clean_value(near_skew),
+        "far_skew": clean_value(far_skew),
+        "skew_slope": clean_value(far_skew - near_skew),
+    }
+
+
+@router.get("/scanner/term-structure")
+def scanner_term_structure(
+    near_dte: int = Query(7, ge=0, le=3650),
+    far_dte: int = Query(60, ge=0, le=3650),
+) -> dict:
+    rows = [
+        row
+        for symbol in SYMBOL_REGISTRY
+        if (row := _term_structure_row(symbol, near_dte, far_dte)) is not None
+    ]
+    return {"near_dte": near_dte, "far_dte": far_dte, "rows": rows}
 
 
 def _strike_profile_snapshot(symbol: str, expiration: str | None) -> dict:
