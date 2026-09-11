@@ -9,7 +9,7 @@ import { NAV } from "@/lib/nav";
 const SYMBOL_SCOPED_BASES = NAV.filter((item) => item.symbolScoped).map((item) => item.href);
 
 /**
- * Keeps a symbol-scoped page (Expiry/Strikes/Screener/History) in sync with
+ * Keeps a symbol-scoped page (Strategy Builder/Backtest) in sync with
  * the sidebar's symbol picker: if the user changes the primary symbol while
  * already on one of these pages, navigate to that same page for the new
  * symbol instead of silently leaving the URL (and all its data) pointed at

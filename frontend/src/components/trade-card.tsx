@@ -53,14 +53,18 @@ export function TradeCard({ candidate }: { candidate: StrategyCandidate }) {
 
       {isCalendar ? (
         <div className="border-t border-border pt-3 text-sm">
-          <div className="flex items-center justify-between">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <div>
               <div className="text-xs text-muted-foreground">
                 {candidate.net_debit_credit >= 0 ? "Net debit" : "Net credit"}
               </div>
               <div className="font-mono font-semibold">{fmtUsd(Math.abs(candidate.net_debit_credit))}</div>
             </div>
-            <div className="text-right">
+            <div>
+              <div className="text-xs text-muted-foreground">Max loss (worst case)</div>
+              <div className="font-mono font-semibold text-[#8f2323]">{fmtUsd(candidate.max_loss)}</div>
+            </div>
+            <div>
               <div className="text-xs text-muted-foreground">Modeled edge (IV-crush estimate)</div>
               <div
                 className={cn(
@@ -74,14 +78,20 @@ export function TradeCard({ candidate }: { candidate: StrategyCandidate }) {
               </div>
             </div>
           </div>
-          {candidate.variance_edge != null && (
-            <p className="mt-1.5 text-xs text-muted-foreground">
-              Front crush {fmtNum(candidate.variance_edge.front_crush, 1)}pt · back crush{" "}
-              {fmtNum(candidate.variance_edge.back_crush, 1)}pt vs. an estimated {fmtNum(candidate.variance_edge.iv_ex, 1)}
-              % post-event baseline IV — a modeled estimate from real recorded IV + vega, not a guaranteed outcome. Max
-              profit/loss aren&apos;t computed for calendars (see the walk-forward P&amp;L below instead).
-            </p>
-          )}
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            Max loss is a genuine upper bound (real math off the strikes and premium, not a fabricated number) but
+            conservatively ignores the back leg&apos;s remaining time value, so the real worst case is typically a
+            bit lower. Max profit still isn&apos;t shown — unlike max loss, it&apos;s reached at an interior stock
+            price rather than a boundary, so there&apos;s no honest number without a real options-pricing model.
+            {candidate.variance_edge != null && (
+              <>
+                {" "}
+                Front crush {fmtNum(candidate.variance_edge.front_crush, 1)}pt · back crush{" "}
+                {fmtNum(candidate.variance_edge.back_crush, 1)}pt vs. an estimated{" "}
+                {fmtNum(candidate.variance_edge.iv_ex, 1)}% post-event baseline IV.
+              </>
+            )}
+          </p>
         </div>
       ) : (
         <>

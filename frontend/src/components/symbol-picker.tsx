@@ -41,7 +41,7 @@ export function SymbolPicker() {
   // Runs the store mutation, then — only if it's a genuine user action, never
   // a background/hydration event, since this only ever executes inside a
   // real click handler — follows the user to the new primary symbol's
-  // version of whatever symbol-scoped page (Expiry/Strategy/History)
+  // version of whatever symbol-scoped page (Strategy Builder/Backtest)
   // they're currently on. An earlier attempt at this used a passive
   // "watch the store for changes" effect instead; it couldn't reliably tell
   // zustand's async localStorage rehydration apart from a real user change
@@ -86,7 +86,7 @@ export function SymbolPicker() {
                   }}
                   title={
                     isPrimary
-                      ? "Primary symbol — drives Expiry Drilldown, Strategy Builder, and History"
+                      ? "Primary symbol — drives Strategy Builder and Backtest"
                       : `Click to make ${sym} the primary symbol`
                   }
                   className={cn(

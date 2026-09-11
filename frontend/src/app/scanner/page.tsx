@@ -11,11 +11,9 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { VolBarChart, type VolBarRow } from "@/components/charts/vol-bar-chart";
 import { VolScatterChart, type VolScatterPoint } from "@/components/charts/vol-scatter-chart";
-import { StrikeProfileChart, type StrikeProfileMetric } from "@/components/charts/strike-profile-chart";
-import { api, ApiError, type CalendarEdgeRow, type ExpiryOption, type ScannerRow, type StrikeProfileRow } from "@/lib/api";
+import { api, ApiError, type ExpiryOption, type ScannerRow } from "@/lib/api";
 import { fmtDate, fmtInt, fmtNum, fmtSigned } from "@/lib/format";
 import { RICHNESS_BG, RICHNESS_HINT, RICHNESS_TEXT, SKEW_BIAS_HINT, richnessKey } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -107,72 +105,6 @@ export default function ScannerPage() {
     };
   }, [pcrExpiration]);
 
-  const [calendarEdgeRows, setCalendarEdgeRows] = useState<CalendarEdgeRow[]>([]);
-  const [calendarEdgeLoading, setCalendarEdgeLoading] = useState(true);
-  const [calendarEdgeError, setCalendarEdgeError] = useState<string | null>(null);
-
-  // Same-day estimate, every symbol in one call -- unlike a real backtest,
-  // needs no walk-forward history, so a symbol added yesterday shows up here
-  // immediately.
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .calendarEdge()
-      .then((res) => !cancelled && setCalendarEdgeRows(res.rows))
-      .catch(() => !cancelled && setCalendarEdgeError("Failed to load calendar edge estimates."))
-      .finally(() => !cancelled && setCalendarEdgeLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const [strikeSymbol, setStrikeSymbol] = useState("");
-  const [strikeExpirations, setStrikeExpirations] = useState<ExpiryOption[]>([]);
-  // Empty string (not null) so the Select stays controlled from the first
-  // render -- same reason as the other Selects on this page.
-  const [strikeExpiration, setStrikeExpiration] = useState("");
-  const [strikeMetric, setStrikeMetric] = useState<StrikeProfileMetric>("iv");
-  const [strikeRows, setStrikeRows] = useState<StrikeProfileRow[]>([]);
-  const [strikeUnderlyingPrice, setStrikeUnderlyingPrice] = useState<number | null>(null);
-  const [strikeLoading, setStrikeLoading] = useState(false);
-  const [strikeError, setStrikeError] = useState<string | null>(null);
-
-  // Default the strike-profile symbol to the first loaded scanner row, once.
-  useEffect(() => {
-    if (!strikeSymbol && data.length > 0) {
-      setStrikeSymbol(data[0].symbol);
-    }
-  }, [data, strikeSymbol]);
-
-  function handleStrikeSymbolChange(symbol: string) {
-    setStrikeExpiration(""); // this symbol's expirations may not include the old one
-    setStrikeSymbol(symbol);
-  }
-
-  // Refetched on symbol or expiration change -- resolves the backend's own
-  // nearest-30-DTE default when expiration is still "".
-  useEffect(() => {
-    if (!strikeSymbol) return;
-    let cancelled = false;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- standard fetch-reset pattern, guarded by `cancelled`
-    setStrikeLoading(true);
-    setStrikeError(null);
-    api
-      .scannerStrikeProfile(strikeSymbol, strikeExpiration || undefined)
-      .then((res) => {
-        if (cancelled) return;
-        setStrikeExpirations(res.available_expirations);
-        setStrikeExpiration(res.expiration ?? "");
-        setStrikeUnderlyingPrice(res.underlying_price);
-        setStrikeRows(res.strikes);
-      })
-      .catch(() => !cancelled && setStrikeError("Failed to load strike profile."))
-      .finally(() => !cancelled && setStrikeLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [strikeSymbol, strikeExpiration]);
-
   // Default sort is |richness_z| descending ("most notable first"), matching
   // build_takeaway()'s own .abs().idxmax() selection elsewhere in the app --
   // the *displayed* value stays signed (fmtSigned), only the sort order uses
@@ -227,11 +159,6 @@ export default function ScannerPage() {
         .filter((r) => r.atm_iv !== null && r.realized_vol !== null)
         .map((r) => ({ symbol: r.symbol, color: r.color, value: (r.atm_iv as number) - (r.realized_vol as number) })),
     [data]
-  );
-
-  const calendarEdgeBarRows: VolBarRow[] = useMemo(
-    () => calendarEdgeRows.map((r) => ({ symbol: r.symbol, color: r.color, value: r.net_vega_pnl })),
-    [calendarEdgeRows]
   );
 
   return (
@@ -306,70 +233,6 @@ export default function ScannerPage() {
                 )}
               </ChartCard>
             </div>
-            <ChartCard
-              title="Strike Profile"
-              hint="Per-strike detail for one symbol+expiration -- IV, delta, and gamma only exist at this level, not summarized per expiry the way the charts above are. IV is one theoretical value per strike in this data source (identical for calls and puts at the same strike), so the smile is one curve; gamma is likewise ~equal call vs put by put-call parity, so its two-sided cut here is gamma weighted by each side's own open interest instead."
-              className="mb-4"
-            >
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-4">
-                  <div className="flex items-center gap-2">
-                    <Label className="text-xs text-muted-foreground">Symbol</Label>
-                    <Select value={strikeSymbol} onValueChange={handleStrikeSymbolChange} disabled={data.length === 0}>
-                      <SelectTrigger size="sm" className="w-28">
-                        <SelectValue placeholder="Symbol" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {data.map((r) => (
-                          <SelectItem key={r.symbol} value={r.symbol}>
-                            {r.symbol}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Label className="text-xs text-muted-foreground">Expiration</Label>
-                    <Select
-                      value={strikeExpiration}
-                      onValueChange={setStrikeExpiration}
-                      disabled={strikeExpirations.length === 0}
-                    >
-                      <SelectTrigger size="sm" className="w-44">
-                        <SelectValue placeholder="Select expiration" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {strikeExpirations.map((e) => (
-                          <SelectItem key={e.expiration} value={e.expiration}>
-                            {fmtDate(e.expiration)} (DTE {e.dte})
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-                <ToggleGroup
-                  type="single"
-                  value={strikeMetric}
-                  onValueChange={(v) => v && setStrikeMetric(v as StrikeProfileMetric)}
-                >
-                  <ToggleGroupItem value="iv">IV Smile</ToggleGroupItem>
-                  <ToggleGroupItem value="delta">Delta</ToggleGroupItem>
-                  <ToggleGroupItem value="gammaOi">Gamma × OI</ToggleGroupItem>
-                </ToggleGroup>
-              </div>
-              {strikeError && <p className="mb-2 text-xs text-destructive">{strikeError}</p>}
-              {strikeLoading ? (
-                <Skeleton className="h-[320px] w-full" />
-              ) : (
-                <StrikeProfileChart
-                  rows={strikeRows}
-                  metric={strikeMetric}
-                  underlyingPrice={strikeUnderlyingPrice}
-                  emptyMessage="No strike data for this symbol/expiration."
-                />
-              )}
-            </ChartCard>
             <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
               <ChartCard
                 title="IV Rank Leaderboard"
@@ -384,24 +247,6 @@ export default function ScannerPage() {
                 <VolBarChart rows={vrpRows} valueLabel="VRP" emptyMessage="No symbols have both IV and realized vol yet." />
               </ChartCard>
             </div>
-            <ChartCard
-              title="Calendar Edge Leaderboard"
-              hint="Estimated dollar edge for a sell-front/buy-back-month 25Δ calendar call spread (~7 DTE front, ~30 DTE back), ranked. This is a MODELED estimate -- a forward-variance decomposition using each leg's real recorded IV and broker-supplied vega, not a guarantee or a backtested win rate. Needs no walk-forward history, so a symbol added yesterday still shows up here; for a real (if short) track record of an actual trade, run it on the Backtest page."
-              className="mb-4"
-            >
-              {calendarEdgeError && <p className="mb-2 text-xs text-destructive">{calendarEdgeError}</p>}
-              {calendarEdgeLoading ? (
-                <Skeleton className="h-64 w-full" />
-              ) : (
-                <VolBarChart
-                  rows={calendarEdgeBarRows}
-                  valueLabel="Modeled edge"
-                  referenceValue={0}
-                  formatValue={(v) => `$${fmtNum(v, 0)}`}
-                  emptyMessage="No symbol currently shows a measurable calendar edge."
-                />
-              )}
-            </ChartCard>
             <ChartCard title="Vol Scanner" bodyClassName="p-0">
             <Table>
               <TableHeader>

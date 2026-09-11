@@ -472,13 +472,35 @@ def build_calendar_call(
     trader actually screens this: same delta, whatever strike that lands on
     each month.
 
-    Deliberately does NOT compute max_profit/max_loss/breakevens/payoff via
+    Deliberately does NOT compute max_profit/breakevens/payoff via
     _summarize()'s intrinsic-value math -- that's only correct when every
     leg expires together, and the back leg here still has real time value at
     front_expiration. Returns those as None/empty instead of a wrong number.
     `variance_edge` (calendar_variance_edge()) is the real edge estimate for
     this structure. Returns None if either expiration's chain can't support
     a call near target_delta.
+
+    max_loss IS computed -- as a genuine worst-case UPPER BOUND, not the
+    precise figure a real pricing model (e.g. OptionStrat, confirmed by
+    hand against a real quote) would give. Two boundary scenarios, both pure
+    strike/premium algebra: if the stock craters, both legs expire
+    worthless and you lose exactly the net debit paid (or keep the credit).
+    If the stock rockets, both legs go to (near-)pure intrinsic value --
+    remaining extrinsic value on the back leg shrinks toward zero deep
+    ITM -- and the position's value converges to the STRIKE WIDTH times the
+    contract multiplier, adjusted by the debit/credit. When front and back
+    strikes differ (the common case here, since legs are matched by delta
+    not strike), this upside bound is often much larger than the debit --
+    confirmed against a real OptionStrat quote (AAPL 325C/335C: debit
+    $65.50, real modeled max loss $983.40, this formula's bound $1065.50 --
+    correctly the same order of magnitude and, as intended, conservatively
+    ABOVE the real figure rather than understating it like a naive
+    "max loss ≈ debit" assumption would). Ignoring the back leg's remaining
+    extrinsic value only ever makes this bound MORE conservative (the real
+    max loss is always <= this), never understates risk. max_profit has no
+    such bound -- it's achieved at an interior stock price, not a boundary,
+    so it genuinely depends on the back leg's remaining time value and
+    can't be derived without a real pricing model.
     """
     front_chain = chain[chain["expiration"] == front_expiration].dropna(
         subset=["delta", "bid", "ask", "strikePrice", "impliedVolatility", "vega"]
@@ -514,19 +536,128 @@ def build_calendar_call(
         ),
     ]
 
+    net_debit_credit = (back_mid - front_mid) * CONTRACT_MULTIPLIER
+    front_strike = float(front_row["strikePrice"])
+    back_strike = float(back_row["strikePrice"])
+    # Worst case is the worse of the two boundary scenarios (see docstring):
+    # stock craters (lose the debit / keep the credit) vs. stock rockets
+    # (position value converges to the strike width, adjusted by the debit/
+    # credit). max(0, ...) since neither boundary is a loss at all when the
+    # position was opened for a large enough net credit.
+    max_loss = max(0.0, net_debit_credit, net_debit_credit + (back_strike - front_strike) * CONTRACT_MULTIPLIER)
+
     return Candidate(
         structure="Calendar Call Spread",
         direction="neutral",
         expiration=front_expiration,
         dte=front_dte,
         legs=legs,
-        net_debit_credit=(back_mid - front_mid) * CONTRACT_MULTIPLIER,
+        net_debit_credit=net_debit_credit,
         max_profit=None,
-        max_loss=None,
+        max_loss=max_loss,
         breakevens=[],
         approx_pop=None,
         payoff=[],
         variance_edge=calendar_variance_edge(front_iv, front_dte, front_vega, back_iv, back_dte, back_vega),
+    )
+
+
+def build_straddle_strangle(
+    chain: pd.DataFrame,
+    expiration: pd.Timestamp,
+    action: Action,
+    target_delta: float = 0.50,
+) -> Candidate | None:
+    """
+    A delta-neutral-at-entry CALL + PUT at (or near) the same strike, both
+    bought or both sold -- `target_delta` near 0.50 lands on the same strike
+    for both legs (a straddle); further OTM (e.g. 0.20-0.30) spreads them
+    into a strangle. `sell` is a premium-selling/short-vol bet (profits if
+    the stock stays between the breakevens, or IV crushes); `buy` is a
+    long-vol bet (profits on a big enough move either way).
+
+    Deliberately does NOT reuse _summarize()'s curve-sampling for max
+    profit/loss, the same reasoning as build_calendar_call() but for a
+    different cause here: a straddle/strangle is genuinely one-sided
+    UNCAPPED (a short position's loss above the call strike has no ceiling;
+    a long position's loss is capped at the premium paid but its profit
+    isn't) -- _summarize()'s bounded price-range sampling would silently
+    report a finite-looking number on the uncapped side, which is wrong, not
+    just imprecise. Hand-derived instead, same pattern as
+    build_cash_secured_put()/build_covered_call(): the CAPPED side gets a
+    real number, the uncapped side is explicitly None.
+
+    Returns None if the chain can't support a call+put near target_delta on
+    this expiration.
+    """
+    exp_chain = chain[chain["expiration"] == expiration].dropna(subset=["delta", "bid", "ask", "strikePrice"])
+    if exp_chain.empty:
+        return None
+
+    call_row = _nearest_to_delta(exp_chain, "CALL", target_delta)
+    put_row = _nearest_to_delta(exp_chain, "PUT", target_delta)
+    if call_row is None or put_row is None:
+        return None
+
+    call_strike = float(call_row["strikePrice"])
+    put_strike = float(put_row["strikePrice"])
+    call_premium = _mid(call_row)
+    put_premium = _mid(put_row)
+    total_premium = call_premium + put_premium
+
+    legs = [
+        Leg(action, "CALL", call_strike, float(call_row["delta"]), call_premium),
+        Leg(action, "PUT", put_strike, float(put_row["delta"]), put_premium),
+    ]
+    breakevens = sorted([put_strike - total_premium, call_strike + total_premium])
+
+    if action == "sell":
+        net_debit_credit = total_premium * CONTRACT_MULTIPLIER
+        max_profit = total_premium * CONTRACT_MULTIPLIER
+        max_loss = None  # uncapped above the call strike -- do not fabricate a number
+        # Profits BETWEEN the breakevens -- same shape _approx_pop()'s existing
+        # 2-breakeven credit branch already handles (an iron-condor-like
+        # "inside the wings" profit zone), so reuse it directly.
+        approx_pop = _approx_pop(exp_chain, legs, breakevens, is_credit=True)
+    else:
+        net_debit_credit = -total_premium * CONTRACT_MULTIPLIER
+        max_profit = None  # uncapped either direction -- do not fabricate a number
+        max_loss = total_premium * CONTRACT_MULTIPLIER
+        # Profits OUTSIDE the breakevens -- the opposite shape from a credit
+        # vertical/short straddle, which _approx_pop()'s existing branches
+        # don't cover, so computed directly here: sum of the two tail
+        # probabilities (delta-as-probability-proxy, interpolated at each
+        # breakeven), not "1 - " them.
+        d_put = _delta_at_price(exp_chain, "PUT", breakevens[0]) or 0.0
+        d_call = _delta_at_price(exp_chain, "CALL", breakevens[1]) or 0.0
+        approx_pop = min(1.0, d_put + d_call)
+
+    is_straddle = call_strike == put_strike
+    label = f"{'Short' if action == 'sell' else 'Long'} {'Straddle' if is_straddle else 'Strangle'}"
+
+    lo = min(put_strike, call_strike) * 0.85
+    hi = max(put_strike, call_strike) * 1.15
+    prices = np.linspace(lo, hi, 121)
+    put_intrinsic = np.maximum(put_strike - prices, 0.0)
+    call_intrinsic = np.maximum(prices - call_strike, 0.0)
+    if action == "sell":
+        pnl = (put_premium - put_intrinsic) + (call_premium - call_intrinsic)
+    else:
+        pnl = (put_intrinsic - put_premium) + (call_intrinsic - call_premium)
+    payoff = [{"underlying": float(p), "pnl": float(v) * CONTRACT_MULTIPLIER} for p, v in zip(prices, pnl)]
+
+    return Candidate(
+        structure=label,
+        direction="neutral",
+        expiration=expiration,
+        dte=int(exp_chain["dte"].iloc[0]),
+        legs=legs,
+        net_debit_credit=net_debit_credit,
+        max_profit=max_profit,
+        max_loss=max_loss,
+        breakevens=breakevens,
+        approx_pop=approx_pop,
+        payoff=payoff,
     )
 
 
