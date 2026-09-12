@@ -98,8 +98,9 @@ export default function DataTrustPage() {
           Every other page renders whatever the latest stored snapshot holds, with no indication of when that snapshot
           is from or how many observations sit behind it -- an IV Rank computed from 3 stored days looks identical to
           one computed from 300. This page shows the coverage the rest of the dashboard is quietly standing on.
-          Trading days here means weekdays; there&apos;s no market-holiday calendar in this project, so a real holiday
-          shows as a missing day rather than being silently papered over.
+          Expected collection days are weekdays, plus any off-schedule day that actually produced data — a manually
+          triggered weekend run counts. There&apos;s no market-holiday calendar in this project, so a real holiday shows
+          as a missing day rather than being silently papered over.
         </p>
 
         {error && (

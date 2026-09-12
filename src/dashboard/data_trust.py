@@ -64,9 +64,16 @@ def _symbol_row(symbol: str, color: str, dates: list[date], calendar: list[date]
         "symbol": symbol,
         "color": color,
         "last_snapshot_date": last_date.isoformat() if last_date else None,
-        # Age in trading days, not calendar days -- a Friday snapshot read on
-        # Monday is 1 trading day old, not 3 days stale.
-        "age_trading_days": len(trading_days(last_date, calendar[-1])) - 1 if last_date else None,
+        # Counted as collection days elapsed within the displayed window rather
+        # than raw calendar days, so a Friday snapshot read on Monday is 1 day
+        # old and not 3. Measured off `calendar` itself instead of recomputing
+        # weekdays: the calendar already includes any off-schedule day that
+        # actually produced data (a manually triggered weekend run), and a day
+        # the pipeline really ran on must count as a day it could have run on.
+        # For a symbol whose last data predates the window this is a floor, not
+        # the true age -- last_snapshot_date is shown alongside so the real date
+        # is never hidden behind the derived number.
+        "age_trading_days": sum(1 for d in calendar if d > last_date) if last_date else None,
         "n_observations": len(dates),
         "days_covered_in_window": len(in_window),
         "largest_gap_trading_days": _largest_missing_run(calendar, covered),
@@ -99,7 +106,23 @@ def build_trust_report(
     """
     # Walk back far enough in calendar days to be sure of covering the
     # requested number of weekdays, then keep the trailing window.
-    calendar = trading_days(today - timedelta(days=window_trading_days * 2 + 10), today)[-window_trading_days:]
+    weekdays = trading_days(today - timedelta(days=window_trading_days * 2 + 10), today)[-window_trading_days:]
+
+    # Any day that actually produced data belongs in the window even if it
+    # isn't a weekday. The pipeline's cron is Mon-Fri, but a manually
+    # triggered run lands on whatever day it's triggered -- and a weekend
+    # recovery run was invisible here until it was added, which made a fully
+    # recovered pipeline still report its last complete run as weeks earlier.
+    # Only days with data are added, never bare weekend days, so this can't
+    # manufacture a gap that the schedule never intended to fill.
+    window_start = weekdays[0] if weekdays else today
+    off_schedule = {
+        day
+        for _, dates in coverage_by_symbol.values()
+        for day in dates
+        if day.weekday() >= 5 and window_start <= day <= today
+    }
+    calendar = sorted(set(weekdays) | off_schedule)
 
     rows = [_symbol_row(symbol, color, dates, calendar) for symbol, (color, dates) in coverage_by_symbol.items()]
 
@@ -119,7 +142,7 @@ def build_trust_report(
         "complete_run_threshold": needed_for_complete,
         "latest_complete_run": latest_complete.isoformat() if latest_complete else None,
         "trading_days_since_complete_run": (
-            len(trading_days(latest_complete, calendar[-1])) - 1 if latest_complete else None
+            sum(1 for d in calendar if d > latest_complete) if latest_complete else None
         ),
         "rows": rows,
     }
