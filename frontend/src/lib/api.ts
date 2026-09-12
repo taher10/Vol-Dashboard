@@ -367,6 +367,54 @@ export interface TermStructureResponse {
   rows: TermStructureRow[];
 }
 
+export interface GammaExposureRow {
+  symbol: string;
+  color: string;
+  expiration: string;
+  dte: number;
+  underlying_price: number;
+  /** Unsigned dollar-gamma magnitude summed across calls+puts at this
+   * expiration -- NOT signed/netted "dealer positioning": open interest
+   * alone doesn't say which side of a contract dealers are on, so no
+   * directional claim is made here, only concentration. */
+  total_gamma_exposure: number;
+  /** Strike where gamma x OI is most concentrated -- a candidate pin level. */
+  peak_strike: number;
+  peak_strike_distance_pct: number;
+}
+
+export interface GammaExposureResponse {
+  target_dte: number;
+  rows: GammaExposureRow[];
+}
+
+export interface DataTrustRow {
+  symbol: string;
+  color: string;
+  last_snapshot_date: string | null;
+  /** Age in trading days, not calendar days -- a Friday snapshot read on
+   * Monday is 1 trading day old, not 3. */
+  age_trading_days: number | null;
+  n_observations: number;
+  days_covered_in_window: number;
+  largest_gap_trading_days: number;
+  covered_days: string[];
+  /** 100/n -- the finest a percentile can resolve with this many
+   * observations. A real derived fact, not a confidence score. */
+  percentile_resolution_pts: number | null;
+}
+
+export interface DataTrustResponse {
+  today: string;
+  calendar: string[];
+  symbol_count: number;
+  symbols_reporting_per_day: Record<string, number>;
+  complete_run_threshold: number;
+  latest_complete_run: string | null;
+  trading_days_since_complete_run: number | null;
+  rows: DataTrustRow[];
+}
+
 export interface CalendarEdgeResponse {
   front_dte: number;
   back_dte: number;
@@ -596,6 +644,12 @@ export const api = {
 
   termStructure: (nearDte = 7, farDte = 60) =>
     apiGet<TermStructureResponse>("/api/scanner/term-structure", { near_dte: nearDte, far_dte: farDte }),
+
+  gammaExposure: (targetDte = 30) =>
+    apiGet<GammaExposureResponse>("/api/scanner/gamma-exposure", { target_dte: targetDte }),
+
+  dataTrust: (windowTradingDays = 45) =>
+    apiGet<DataTrustResponse>("/api/data-trust", { window_trading_days: windowTradingDays }),
 
   scannerStrikeProfile: (symbol: string, expiration?: string) =>
     apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),
