@@ -19,7 +19,7 @@ for j in json.load(sys.stdin)['jobs']:
 "
 ```
 
-- Failed at **`Run daily snapshot`** → expired refresh token. See the section below.
+- Failed at **`Run daily snapshot`** → two possibilities, and the run summary tells them apart. If the per-symbol failure detail says `invalid_grant` / "Refresh token is invalid", it's an expired refresh token (section below). If *every* symbol failed with the same non-auth error, it's almost certainly a dependency drift — see "An unrelated dependency can break the Schwab pipeline" below, and don't touch the token.
 - Failed at **`Restore token.json from secret`** → the `SCHWAB_TOKEN_B64` secret itself is unusable (empty, malformed base64, or not JSON). See the section below that.
 - Failed at **`Commit history if it changed`** → repo size / Git LFS. See further below.
 
@@ -110,6 +110,43 @@ If this recurs a 4th time, the real fix is probably to stop relying on manual co
 **Why it happens:** confirmed by direct inspection of `bundle.chain` for SPX: `gamma` is populated normally, but `openInterest` is exactly `0` for every single contract, every expiration. This looks like a real gap in how Schwab reports OI for cash-settled index options through this API, not a bug in this codebase's fetch/parse logic (other numeric fields on the same rows are fine).
 
 **The fix:** none needed on this end -- any OI-weighted per-strike metric (gamma exposure, and anything similar built later) should expect SPX to legitimately return `None`/be absent rather than try to "fix" it into showing a `0`. A `0` here would be worse than missing, since it reads as "no gamma risk" rather than "no OI data." If a future feature genuinely needs SPX's OI, that's a Schwab data-availability question to chase down externally, not something to work around by approximating a number that isn't there.
+
+---
+
+## An unrelated dependency can break the Schwab pipeline (CI installs differ from local)
+
+**Recurred: 1 time (2026-09-12).**
+
+**What it looks like:** the workflow gets past auth and into the per-symbol loop, then *every* symbol fails with the identical non-auth error. The first real instance:
+
+```
+❌ 24 failed: AAPL, AMD, AMZN, ...
+AAPL: 'Timeout' object cannot be interpreted as an integer
+```
+
+The giveaway that this isn't a token problem: auth succeeded (the run reached the fetch loop), and all 24 symbols failed the same way. A token problem fails differently and says so.
+
+**Why it happens:** `requirements.txt` pins nothing — every entry is `>=`. CI runs `pip install -r requirements.txt` on a fresh runner, so it resolves to whatever is newest that day, while your local venv keeps whatever it installed months ago. The two environments drift apart silently and the *local* one is the misleading one, because it's the one that still works.
+
+The actual chain, which is worth reading because nothing about it is local to the code that broke:
+
+1. `anthropic` (used only by the chatbot in `src/api/chat.py` — nothing to do with Schwab) released a major version that requires the new `httpx2` package.
+2. `httpx2` therefore got installed in CI. It was never installed locally.
+3. Authlib 1.8.0 has a compat shim that *prefers* `httpx2` and only falls back to legacy `httpx` when httpx2 is absent. Its mere presence flipped Authlib onto it.
+4. schwab-py's session is an Authlib client, and `src/auth.py` was assigning `client.session.timeout = httpx.Timeout(...)` — a `Timeout` from the *legacy* library, now a foreign type to the httpx2-backed session. httpx2 tried to coerce it to a number and raised.
+
+**The fix:** assign a plain number, not a library-specific object (`src/auth.py`, both `authenticate()` and `get_client()`). Both libraries accept a float, so the coupling is gone. Full reasoning is in that module's docstring.
+
+**The generalisable lesson:** when CI fails and local works with no code change, diff the environments before debugging the code. This reproduces it exactly, and takes about a minute:
+
+```bash
+python -m venv /tmp/fullenv && /tmp/fullenv/bin/pip install -q -r requirements.txt
+diff <(pip list) <(/tmp/fullenv/bin/pip list)
+```
+
+Pay attention to packages present in CI and *absent* locally, not just version bumps — `httpx2` appearing out of nowhere was the whole story here, and no version number in the diff would have pointed at it.
+
+**Still unpinned, deliberately.** Pinning would have prevented this, but the trigger was `anthropic`, and freezing that would hold back the chatbot SDK for the sake of the data pipeline. The float fix removes the coupling that made the drift fatal. If this class of failure recurs with a different package, revisit — a constraints file covering just the Schwab path (`schwab-py`, `authlib`) is the narrower option.
 
 ---
 

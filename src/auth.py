@@ -12,6 +12,26 @@ Usage
 
     # Every subsequent run:
     client = auth.get_client()
+
+A note on the request timeout
+-----------------------------
+`client.session.timeout` is assigned a plain number, never an
+`httpx.Timeout` instance, and that matters more than it looks.
+
+schwab-py's session is an Authlib OAuth2 client, and since Authlib 1.8.0
+that client is backed by whichever HTTP library is available: it prefers
+`httpx2` and only falls back to the legacy `httpx` when httpx2 isn't
+installed. Those are two separate packages with two separate `Timeout`
+classes. Handing an `httpx.Timeout` to an httpx2-backed session makes
+httpx2 try to coerce a foreign object into a number, which fails with
+`'Timeout' object cannot be interpreted as an integer` -- on every symbol,
+with no code change to explain it.
+
+This took down the daily pipeline for real: `anthropic` (used only by the
+chatbot in src/api/chat.py, nothing to do with Schwab) released a major
+version requiring httpx2, CI installs unpinned so it picked that up, and
+httpx2's mere presence flipped Authlib onto it. A plain float is accepted
+by both libraries, so it can't break this way again.
 """
 
 from __future__ import annotations
@@ -25,7 +45,6 @@ from pathlib import Path
 
 import schwab
 from dotenv import load_dotenv
-import httpx
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.ini"
@@ -153,7 +172,7 @@ class SchwabAuth:
             callback_url=self.callback_url,
             token_path=str(self.token_path),
         )
-        client.session.timeout = httpx.Timeout(self.timeout)
+        client.session.timeout = self.timeout  # plain number -- see module docstring
         print(f"[SchwabAuth] Token saved to: {self.token_path}")
         return client
 
@@ -172,5 +191,5 @@ class SchwabAuth:
             api_key=self.api_key,
             app_secret=self.app_secret,
         )
-        client.session.timeout = httpx.Timeout(self.timeout)
+        client.session.timeout = self.timeout  # plain number -- see module docstring
         return client
