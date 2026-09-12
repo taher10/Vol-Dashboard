@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from src.data_quality import LiveDataUnavailableError
 from src.dashboard import backtest_engine, data_loader, decision_engine, insights, strategy_engine
+from src.dashboard import data_trust as data_trust_report
 from src.dashboard.data_loader import SnapshotBundle
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
@@ -515,6 +516,98 @@ def _term_structure_row(symbol: str, near_dte: int, far_dte: int) -> dict | None
     }
 
 
+def _gamma_exposure_row(symbol: str, target_dte: int = 30) -> dict | None:
+    """Unsigned dollar-gamma concentration for one symbol at its expiration
+    nearest target_dte, read straight from bundle.chain the same way
+    _strike_profile_snapshot() does (gamma/OI only exist at the contract
+    level, never in bundle.metrics). Deliberately NOT signed/netted
+    call-minus-put "dealer positioning" -- open interest alone doesn't say
+    which side of a contract dealers are actually on, so a directional
+    number here would be fabricated precision, not a real signal. This
+    reports magnitude (how much gamma-driven hedging flow is concentrated
+    in this name right now) and where it's concentrated (peak_strike), not
+    which way it would push price. Returns None for a symbol with no
+    snapshot, no live (non-expired) expiration, no underlying price, or no
+    strike with usable gamma+OI on either side -- never raises, never
+    reports a fabricated zero for "no data"."""
+    try:
+        bundle = data_loader.load_latest_snapshot(symbol)
+    except FileNotFoundError:
+        return None
+
+    chain = bundle.chain
+    if chain is None or chain.empty:
+        return None
+
+    live_expirations = [
+        {"expiration": exp_str, "dte": dte}
+        for exp_str in chain["expiration"].dropna().apply(lambda e: pd.Timestamp(e).date().isoformat()).unique()
+        if (dte := _live_dte(exp_str)) >= 0
+    ]
+    if not live_expirations:
+        return None
+    nearest = min(live_expirations, key=lambda e: abs(e["dte"] - target_dte))
+
+    underlying_price = _underlying_price(chain)
+    if underlying_price is None:
+        return None
+
+    chain = chain.copy()
+    chain["expiration_str"] = chain["expiration"].apply(lambda e: pd.Timestamp(e).date().isoformat())
+    exp_chain = chain[chain["expiration_str"] == nearest["expiration"]]
+
+    call_by_strike: dict[float, pd.Series] = {}
+    put_by_strike: dict[float, pd.Series] = {}
+    for _, row in exp_chain.iterrows():
+        strike = row.get("strikePrice")
+        if strike is None or pd.isna(strike):
+            continue
+        target = call_by_strike if row.get("optionType") == "CALL" else put_by_strike
+        target[float(strike)] = row
+
+    def _gamma_oi(row: pd.Series | None) -> float:
+        if row is None:
+            return 0.0
+        gamma, oi = row.get("gamma"), row.get("openInterest")
+        if gamma is None or oi is None or pd.isna(gamma) or pd.isna(oi):
+            return 0.0
+        return float(gamma) * float(oi)
+
+    combined_by_strike: dict[float, float] = {}
+    for strike in sorted(set(call_by_strike) | set(put_by_strike)):
+        combined = _gamma_oi(call_by_strike.get(strike)) + _gamma_oi(put_by_strike.get(strike))
+        if combined:
+            combined_by_strike[strike] = combined
+
+    if not combined_by_strike:
+        return None
+
+    raw_gamma_oi = sum(combined_by_strike.values())
+    total_gamma_exposure = raw_gamma_oi * 100 * underlying_price**2 * 0.01
+    peak_strike = max(combined_by_strike, key=combined_by_strike.get)
+
+    return {
+        "symbol": symbol,
+        "color": SYMBOL_REGISTRY[symbol].color,
+        "expiration": nearest["expiration"],
+        "dte": nearest["dte"],
+        "underlying_price": clean_value(underlying_price),
+        "total_gamma_exposure": clean_value(total_gamma_exposure),
+        "peak_strike": clean_value(peak_strike),
+        "peak_strike_distance_pct": clean_value((peak_strike - underlying_price) / underlying_price * 100),
+    }
+
+
+@router.get("/scanner/gamma-exposure")
+def scanner_gamma_exposure(target_dte: int = Query(30, ge=0, le=3650)) -> dict:
+    rows = [
+        row
+        for symbol in SYMBOL_REGISTRY
+        if (row := _gamma_exposure_row(symbol, target_dte)) is not None
+    ]
+    return {"target_dte": target_dte, "rows": rows}
+
+
 @router.get("/scanner/term-structure")
 def scanner_term_structure(
     near_dte: int = Query(7, ge=0, le=3650),
@@ -944,6 +1037,15 @@ def trade_ideas(limit: int = Query(_DEFAULT_MAX_TRADE_IDEAS, ge=1, le=20)) -> di
 # ---------------------------------------------------------------------------
 # History (IV Rank / trailing z-score) — bonus stat-tile data
 # ---------------------------------------------------------------------------
+
+
+@router.get("/data-trust")
+def data_trust(window_trading_days: int = Query(45, ge=5, le=250)) -> dict:
+    coverage = {
+        symbol: (meta.color, _history_store.snapshot_dates(symbol))
+        for symbol, meta in SYMBOL_REGISTRY.items()
+    }
+    return data_trust_report.build_trust_report(coverage, today=date.today(), window_trading_days=window_trading_days)
 
 
 @router.get("/history/{symbol}/iv-rank")

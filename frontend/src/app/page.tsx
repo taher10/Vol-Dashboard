@@ -116,7 +116,11 @@ export default function OverviewPage() {
                 <StatCard
                   label="IV Rank (30d)"
                   value={fmtNum(ivRank.iv_rank, 0)}
-                  sub={`Percentile ${fmtNum(ivRank.iv_percentile, 0)} · IV ${fmtNum(ivRank.current_iv, 1)}`}
+                  // n is shown because iv_rank() returns a percentile off as
+                  // few as 2 stored dates -- without the sample size a rank
+                  // from a handful of observations reads exactly like one
+                  // from a full year. See the Data Trust page.
+                  sub={`Percentile ${fmtNum(ivRank.iv_percentile, 0)} · IV ${fmtNum(ivRank.current_iv, 1)} · n=${ivRank.n_observations}`}
                 />
               )}
             </>

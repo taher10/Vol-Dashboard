@@ -36,9 +36,14 @@ content is a harmless no-op.
 Requires a GitHub PAT with permission to manage this repo's Actions secrets
 (classic PAT: 'repo' scope; fine-grained PAT: 'Secrets' repository
 permission set to Read and write) stored as the SECRETS_PAT repo secret --
-the default GITHUB_TOKEN cannot manage Actions secrets. No-op (logs and
-returns False) if SECRETS_PAT/GITHUB_REPOSITORY aren't set, so this is
-harmless to call locally or anywhere else CI-only env vars aren't present.
+the default GITHUB_TOKEN cannot manage Actions secrets.
+
+Outside CI (no GITHUB_ACTIONS env var) this stays a harmless no-op when
+SECRETS_PAT/GITHUB_REPOSITORY aren't set, so it's safe to call locally.
+*Inside* CI the same situation is fatal instead -- see
+TokenSyncMisconfiguredError for why a quiet skip there proved actively
+harmful. It also refuses to push a token file that isn't valid JSON, so a
+failed auth can't corrupt a recoverable secret into an unrecoverable one.
 
 Usage:
     python -m src.token_sync
@@ -47,6 +52,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import sys
@@ -70,6 +76,18 @@ SECRET_NAME = "SCHWAB_TOKEN_B64"
 API_BASE = "https://api.github.com"
 
 
+class TokenSyncMisconfiguredError(Exception):
+    """Raised when this is running in CI but can't do its job -- either
+    SECRETS_PAT isn't configured, or the on-disk token is unusable.
+
+    Deliberately fatal rather than a warning: a silent no-op here is exactly
+    how the refresh token was allowed to expire five separate times. The sync
+    step reported success on every run while doing nothing at all, so the
+    only visible symptom was the pipeline dying about a week later for
+    apparently unrelated reasons. Failing the step makes the actual cause
+    obvious on the run that causes it, not seven days downstream."""
+
+
 def _encrypt_secret(public_key_b64: str, secret_value: str) -> str:
     """Encrypt secret_value per GitHub's 'update a repo secret' API (libsodium sealed box)."""
     public_key = public.PublicKey(public_key_b64.encode("utf-8"), encoding.Base64Encoder())
@@ -87,7 +105,16 @@ def sync_token_to_secret(token_path: Path | None = None) -> bool:
     """
     pat = os.environ.get("SECRETS_PAT")
     repo = os.environ.get("GITHUB_REPOSITORY")  # "owner/repo", auto-set in Actions
+    in_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     if not pat or not repo:
+        if in_ci:
+            raise TokenSyncMisconfiguredError(
+                "Running in GitHub Actions but SECRETS_PAT isn't configured, so the "
+                "refreshed token can't be written back to the SCHWAB_TOKEN_B64 secret. "
+                "Every run will keep working until Schwab rotates the refresh token out "
+                "(~7 days) and then the pipeline will fail with invalid_grant. Add a PAT "
+                "with Actions 'Secrets: write' permission as the SECRETS_PAT repo secret."
+            )
         logger.info(
             "SECRETS_PAT or GITHUB_REPOSITORY not set -- skipping token sync "
             "(expected outside CI)."
@@ -101,7 +128,29 @@ def sync_token_to_secret(token_path: Path | None = None) -> bool:
         logger.warning("No token file at %s -- nothing to sync.", path)
         return False
 
-    token_b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
+    # Validate before pushing. This step runs with `if: always()` so that a
+    # genuinely refreshed token still gets saved when the snapshot failed for
+    # an unrelated reason -- but that also means it can run right after a
+    # failed auth, when whatever is on disk may be truncated or half-written.
+    # Pushing that would overwrite a merely-expired secret with an undecodable
+    # one, turning a self-healing problem into a deadlock: the next run then
+    # fails at "Restore token.json from secret" before the pipeline can run,
+    # so this sync never gets another chance to repair it. Refusing to push
+    # unusable content is what keeps `if: always()` safe.
+    raw = path.read_bytes()
+    try:
+        json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        message = (
+            f"Refusing to sync {path}: it is {len(raw)} bytes that aren't valid JSON ({exc}). "
+            "Pushing this would replace a recoverable SCHWAB_TOKEN_B64 with an undecodable one."
+        )
+        if in_ci:
+            raise TokenSyncMisconfiguredError(message) from exc
+        logger.warning(message)
+        return False
+
+    token_b64 = base64.b64encode(raw).decode("utf-8")
 
     headers = {
         "Authorization": f"Bearer {pat}",
