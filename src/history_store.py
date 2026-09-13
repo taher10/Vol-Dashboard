@@ -158,6 +158,47 @@ class HistoryStore:
     # Reading
     # ------------------------------------------------------------------
 
+    def collection_stats(self, symbol: str, limit: int = 6) -> list[dict]:
+        """
+        Per-snapshot-date shape of what was actually stored for `symbol`, most
+        recent first: how many expiry rows landed and how many of them are
+        missing each metric.
+
+        Exists because "the symbol has rows for today" is a weaker guarantee
+        than it looks. A symbol can record its usual 18 expirations with every
+        `vrp` null (price history failed -- job.py swallows that into a log
+        warning by design, so the run still succeeds), or record 3 expirations
+        instead of 18 because the chain came back thin. Both look like healthy
+        collection to anything that only counts rows. src/validate_collection.py
+        compares these counts against the symbol's own recent history rather
+        than fixed thresholds, since a legitimate expiry count varies a lot by
+        how liquid the underlying is (APLD ~12, SPX ~21).
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT snapshot_date,
+                       COUNT(*)              AS expirations,
+                       SUM(atm_iv IS NULL)   AS null_atm_iv,
+                       SUM(vrp IS NULL)      AS null_vrp
+                FROM metric_history
+                WHERE symbol = ?
+                GROUP BY snapshot_date
+                ORDER BY snapshot_date DESC
+                LIMIT ?
+                """,
+                (symbol, limit),
+            ).fetchall()
+        return [
+            {
+                "snapshot_date": date.fromisoformat(r[0]),
+                "expirations": r[1],
+                "null_atm_iv": r[2],
+                "null_vrp": r[3],
+            }
+            for r in rows
+        ]
+
     def snapshot_dates(self, symbol: str) -> list[date]:
         """Every date we have a stored snapshot for this symbol, ascending."""
         with self._connect() as conn:

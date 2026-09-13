@@ -61,7 +61,70 @@ def _in_ci() -> bool:
     return os.environ.get("GITHUB_ACTIONS") == "true"
 
 
-def validate(max_stale_days: int = 3, window_trading_days: int = 45, today: date | None = None) -> int:
+def _depth_problems(symbol: str, stats: list[dict], thin_fraction: float) -> list[str]:
+    """Quality checks on the newest stored day for one symbol, judged against
+    that symbol's own recent history rather than fixed numbers.
+
+    Row presence alone is a weak guarantee -- these are the three ways
+    collection has actually degraded, or can degrade, while still writing
+    rows that look fine to a coverage check:
+
+    1. Thin chain. A symbol that normally stores ~18 expirations suddenly
+       storing 3 means the chain came back partial. Compared against the
+       symbol's own median because a healthy count is 12 for APLD and 21 for
+       SPX -- a single global threshold would either miss the former or cry
+       wolf on the latter.
+    2. VRP regression. `vrp`/`realized_vol` need the price-history fetch,
+       which job.py wraps in a try/except that logs a warning and carries on
+       (deliberately -- a price-history failure shouldn't lose the whole
+       options snapshot). So VRP can silently go all-null while everything
+       else looks perfect. Only flagged when the previous stored day HAD
+       vrp: before 2026-09-12 no day had any, and re-litigating that history
+       would be noise rather than signal.
+    3. Missing ATM IV. Schwab returns -999 sentinels when it has no live
+       quote. data_quality.is_chain_usable rejects a chain only when more
+       than half the rows are unusable, so a chain that is 51% valid is
+       persisted with the rest as nulls.
+    """
+    if not stats:
+        return []
+
+    latest, prior = stats[0], stats[1:]
+    problems: list[str] = []
+
+    if prior:
+        counts = sorted(s["expirations"] for s in prior)
+        median = counts[len(counts) // 2]
+        if median and latest["expirations"] < median * thin_fraction:
+            problems.append(
+                f"{symbol}: only {latest['expirations']} expirations on {latest['snapshot_date']}, "
+                f"against a recent median of {median} -- chain came back thin."
+            )
+
+        previous_had_vrp = prior[0]["expirations"] > prior[0]["null_vrp"]
+        latest_has_vrp = latest["expirations"] > latest["null_vrp"]
+        if previous_had_vrp and not latest_has_vrp:
+            problems.append(
+                f"{symbol}: vrp/realized_vol is entirely null on {latest['snapshot_date']} but was "
+                f"present on {prior[0]['snapshot_date']} -- the price-history fetch is failing "
+                "silently (job.py logs it as a warning and continues)."
+            )
+
+    if latest["expirations"] and latest["null_atm_iv"] / latest["expirations"] > 0.25:
+        problems.append(
+            f"{symbol}: {latest['null_atm_iv']} of {latest['expirations']} expirations have no "
+            f"atm_iv on {latest['snapshot_date']} -- likely Schwab -999 sentinel quotes."
+        )
+
+    return problems
+
+
+def validate(
+    max_stale_days: int = 3,
+    window_trading_days: int = 45,
+    today: date | None = None,
+    thin_fraction: float = 0.5,
+) -> int:
     """Returns a process exit code: 0 healthy, 1 problems found."""
     today = today or date.today()
     store = HistoryStore()
@@ -104,6 +167,13 @@ def validate(max_stale_days: int = 3, window_trading_days: int = 45, today: date
         age = "never recorded" if row["age_trading_days"] is None else f"{row['age_trading_days']} days ago"
         problems.append(f"{row['symbol']}: last recorded {last} ({age}).")
 
+    # Depth checks run only for symbols that are actually current. For a
+    # symbol that stopped reporting days ago, "its newest day looks thin" is
+    # noise stacked on top of the real finding, which is already reported.
+    current = {r["symbol"] for r in report["rows"]} - {r["symbol"] for r in stale}
+    for symbol in sorted(current):
+        problems.extend(_depth_problems(symbol, store.collection_stats(symbol), thin_fraction))
+
     if problems:
         for p in problems:
             _annotate("error", p)
@@ -130,8 +200,19 @@ def main() -> int:
         "chosen to absorb a market holiday without crying wolf).",
     )
     parser.add_argument("--window", type=int, default=45, help="Coverage window in collection days (default: 45).")
+    parser.add_argument(
+        "--thin-fraction",
+        type=float,
+        default=0.5,
+        help="Fail when a symbol stores fewer than this fraction of its own recent median "
+        "expiration count (default: 0.5, i.e. a halving).",
+    )
     args = parser.parse_args()
-    return validate(max_stale_days=args.max_stale_days, window_trading_days=args.window)
+    return validate(
+        max_stale_days=args.max_stale_days,
+        window_trading_days=args.window,
+        thin_fraction=args.thin_fraction,
+    )
 
 
 if __name__ == "__main__":
