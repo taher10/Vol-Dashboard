@@ -108,13 +108,21 @@ def degenerate_metric_mask(df: "pd.DataFrame") -> "pd.Series":
     if df is None or df.empty:
         return pd.Series(dtype=bool)
 
+    # Coerce before comparing: a metric column that's entirely missing arrives
+    # as object dtype full of None (HistoryStore.append_snapshot assigns a bare
+    # `None` when, say, no skew table was computed), and `.abs()` raises
+    # TypeError on that rather than propagating nulls. errors="coerce" turns
+    # both None and any stray non-numeric into NaN, which compares False --
+    # a missing metric is a gap to report elsewhere, not a degenerate value to
+    # quietly drop from a chart.
     mask = pd.Series(False, index=df.index)
     if "dte" in df.columns:
-        mask |= df["dte"] == 0
-    if "atm_iv" in df.columns:
-        mask |= df["atm_iv"].abs() > MAX_PLAUSIBLE_IV
-    if "skew" in df.columns:
-        mask |= df["skew"].abs() > MAX_PLAUSIBLE_SKEW
-    if "curvature" in df.columns:
-        mask |= df["curvature"].abs() > MAX_PLAUSIBLE_CURVATURE
-    return mask.fillna(False)
+        mask |= pd.to_numeric(df["dte"], errors="coerce") == 0
+    for column, bound in (
+        ("atm_iv", MAX_PLAUSIBLE_IV),
+        ("skew", MAX_PLAUSIBLE_SKEW),
+        ("curvature", MAX_PLAUSIBLE_CURVATURE),
+    ):
+        if column in df.columns:
+            mask |= pd.to_numeric(df[column], errors="coerce").abs() > bound
+    return mask.fillna(False).astype(bool)

@@ -1,0 +1,39 @@
+name: Tests
+
+# Runs the unit suite on every push and pull request.
+#
+# These tests cover the data-collection monitoring logic (data_trust,
+# validate_collection, data_quality's degenerate_metric_mask) -- the code that
+# decides whether the daily pipeline is healthy. That code failing silently is
+# worse than most bugs here, because its whole job is to notice when something
+# else has gone wrong: a broken validator reports "all good" forever and the
+# next outage runs for weeks unnoticed, which has already happened once.
+#
+# No secrets and no network. Nothing here touches Schwab, and in particular
+# nothing authenticates -- an accidental token refresh from CI would rotate
+# the live refresh token and could break the real pipeline.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest

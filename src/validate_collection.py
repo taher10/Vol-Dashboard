@@ -137,14 +137,23 @@ def validate(
     window_trading_days: int = 45,
     today: date | None = None,
     thin_fraction: float = 0.5,
+    store: HistoryStore | None = None,
+    symbols: dict | None = None,
 ) -> int:
-    """Returns a process exit code: 0 healthy, 1 problems found."""
+    """Returns a process exit code: 0 healthy, 1 problems found.
+
+    `store` and `symbols` default to the real history database and the real
+    SYMBOL_REGISTRY; they're injectable so tests can drive this against a
+    temporary database and a known symbol set instead of whatever today's
+    production data happens to look like.
+    """
     today = today or date.today()
-    store = HistoryStore()
+    store = store or HistoryStore()
+    symbols = symbols if symbols is not None else SYMBOL_REGISTRY
 
     coverage = {
         symbol: (meta.color, store.snapshot_dates(symbol))
-        for symbol, meta in SYMBOL_REGISTRY.items()
+        for symbol, meta in symbols.items()
     }
     report = data_trust.build_trust_report(coverage, today=today, window_trading_days=window_trading_days)
 
