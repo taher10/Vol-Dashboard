@@ -19,7 +19,20 @@ python -m src.validate_collection --max-stale-days 3
 
 Prefer `.venv/bin/python3` if a `.venv` exists. This reuses `src/dashboard/data_trust.py`, the same gap analysis the `/data-trust` page shows, so your answer and the UI can't disagree.
 
-Exit code 0 means healthy — say so plainly and stop. A non-zero exit names exactly which symbols are stale or never recorded; carry those names into your report rather than summarising them away.
+Exit code 0 means healthy — say so plainly and stop. A non-zero exit names exactly what's wrong; carry those names into your report rather than summarising them away.
+
+It checks four things, and the last three matter because **rows existing is a weaker guarantee than it looks** — a symbol can record its usual expirations with the data quietly degraded:
+
+| Check | Catches |
+|---|---|
+| Coverage | A symbol (or the whole pipeline) stopped recording |
+| Chain depth | A symbol stored far fewer expirations than its own recent median — partial chain |
+| VRP regression | `vrp`/`realized_vol` went all-null while everything else looks fine |
+| ATM IV nulls | Schwab `-999` sentinel quotes persisted as nulls |
+
+The VRP one deserves attention: `job.py` wraps the price-history fetch in a `try/except` that logs a warning and carries on, deliberately, so a price-history failure doesn't cost the whole options snapshot. The run therefore *succeeds* while VRP silently dies. VRP only started working on 2026-09-12, so it's the least proven part of the pipeline — treat a VRP alarm as real, not as a threshold artefact.
+
+Depth checks compare each symbol against **its own** recent history, never a global threshold: a healthy expiration count is ~12 for APLD and ~21 for SPX, so one fixed number would either miss real thinning or cry wolf constantly.
 
 For a fuller picture (coverage window, per-symbol observation counts, largest gaps), the API gives the same report as structured data when a backend is running on port 8000:
 
