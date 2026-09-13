@@ -110,6 +110,19 @@ def _depth_problems(symbol: str, stats: list[dict], thin_fraction: float) -> lis
                 "silently (job.py logs it as a warning and continues)."
             )
 
+    # Implausible magnitudes at dte > 0 only. Expiration-day rows are also
+    # degenerate (IV stops being meaningful as time to expiry hits zero) but
+    # they turn up on every expiry Friday by design, so alerting on them would
+    # fire most weeks and train the reader to ignore this whole check. The
+    # charts already exclude them via data_quality.degenerate_metric_mask.
+    # What's worth waking someone for is the rare kind: exactly one row in the
+    # entire stored history (APLD, 527 DTE, skew 477) looks like this.
+    if latest.get("implausible"):
+        problems.append(
+            f"{symbol}: {latest['implausible']} row(s) on {latest['snapshot_date']} have implausible "
+            "metric magnitudes at dte > 0 -- likely unusable quotes on an illiquid expiration."
+        )
+
     if latest["expirations"] and latest["null_atm_iv"] / latest["expirations"] > 0.25:
         problems.append(
             f"{symbol}: {latest['null_atm_iv']} of {latest['expirations']} expirations have no "
@@ -124,14 +137,23 @@ def validate(
     window_trading_days: int = 45,
     today: date | None = None,
     thin_fraction: float = 0.5,
+    store: HistoryStore | None = None,
+    symbols: dict | None = None,
 ) -> int:
-    """Returns a process exit code: 0 healthy, 1 problems found."""
+    """Returns a process exit code: 0 healthy, 1 problems found.
+
+    `store` and `symbols` default to the real history database and the real
+    SYMBOL_REGISTRY; they're injectable so tests can drive this against a
+    temporary database and a known symbol set instead of whatever today's
+    production data happens to look like.
+    """
     today = today or date.today()
-    store = HistoryStore()
+    store = store or HistoryStore()
+    symbols = symbols if symbols is not None else SYMBOL_REGISTRY
 
     coverage = {
         symbol: (meta.color, store.snapshot_dates(symbol))
-        for symbol, meta in SYMBOL_REGISTRY.items()
+        for symbol, meta in symbols.items()
     }
     report = data_trust.build_trust_report(coverage, today=today, window_trading_days=window_trading_days)
 

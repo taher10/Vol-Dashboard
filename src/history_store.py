@@ -39,6 +39,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src import data_quality
+
 _PROJECT_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / "history" / "vol_history.db"
 
@@ -180,14 +182,22 @@ class HistoryStore:
                 SELECT snapshot_date,
                        COUNT(*)              AS expirations,
                        SUM(atm_iv IS NULL)   AS null_atm_iv,
-                       SUM(vrp IS NULL)      AS null_vrp
+                       SUM(vrp IS NULL)      AS null_vrp,
+                       SUM(dte > 0 AND (ABS(atm_iv) > ? OR ABS(skew) > ? OR ABS(curvature) > ?))
+                                             AS implausible
                 FROM metric_history
                 WHERE symbol = ?
                 GROUP BY snapshot_date
                 ORDER BY snapshot_date DESC
                 LIMIT ?
                 """,
-                (symbol, limit),
+                (
+                    data_quality.MAX_PLAUSIBLE_IV,
+                    data_quality.MAX_PLAUSIBLE_SKEW,
+                    data_quality.MAX_PLAUSIBLE_CURVATURE,
+                    symbol,
+                    limit,
+                ),
             ).fetchall()
         return [
             {
@@ -195,6 +205,7 @@ class HistoryStore:
                 "expirations": r[1],
                 "null_atm_iv": r[2],
                 "null_vrp": r[3],
+                "implausible": r[4] or 0,
             }
             for r in rows
         ]

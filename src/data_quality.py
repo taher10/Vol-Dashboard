@@ -65,3 +65,64 @@ def is_regular_market_hours(now: datetime | None = None) -> bool:
     if now.weekday() >= 5:  # Saturday=5, Sunday=6
         return False
     return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE
+
+
+# Bounds for degenerate_metric_mask below. Calibrated against the real stored
+# history (4,686 rows as of 2026-09-12) rather than picked as round numbers:
+# together with the dte==0 rule they remove 65 rows (1.39%), and what survives
+# tops out at 188.9 IV / 20.1 skew / 22.6 curvature -- all plausible readings.
+# Deliberately generous, so only the unambiguous is dropped.
+MAX_PLAUSIBLE_IV = 500.0
+MAX_PLAUSIBLE_SKEW = 100.0
+MAX_PLAUSIBLE_CURVATURE = 100.0
+
+
+def degenerate_metric_mask(df: "pd.DataFrame") -> "pd.Series":
+    """
+    True for rows whose computed vol metrics are mathematically degenerate
+    rather than merely unusual -- for charting, these should be left out, not
+    plotted and not silently trusted.
+
+    Two distinct causes, both real in this project's stored history:
+
+    1. `dte == 0`. On expiration day, time to expiry approaches zero and
+       implied vol stops being numerically meaningful: the same solver that
+       returns a sane 50% at 30 DTE returned 2687% for NFLX and a skew of 926
+       on its expiry date. This isn't bad data from Schwab, it's what the
+       maths does at the boundary, and it accounts for 64 of the 65 rows this
+       catches. Nothing is wrong with the underlying quotes, so the rows are
+       kept in the database -- a 0DTE trader may legitimately want them --
+       they just don't belong on a term-structure curve where one point at
+       2687 flattens every real reading into a straight line.
+    2. Absurd magnitudes at any dte. Exactly one row in the stored history
+       (APLD, 2026-08-12, 527 DTE: skew 477, curvature -240) comes from an
+       illiquid long-dated LEAPS where the 25-delta strikes had unusable
+       quotes. Rare, but one such point ruins a chart's axis just as
+       thoroughly as sixty-four.
+
+    Returns an all-False mask for a frame with none of the relevant columns,
+    so callers can apply this unconditionally.
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return pd.Series(dtype=bool)
+
+    # Coerce before comparing: a metric column that's entirely missing arrives
+    # as object dtype full of None (HistoryStore.append_snapshot assigns a bare
+    # `None` when, say, no skew table was computed), and `.abs()` raises
+    # TypeError on that rather than propagating nulls. errors="coerce" turns
+    # both None and any stray non-numeric into NaN, which compares False --
+    # a missing metric is a gap to report elsewhere, not a degenerate value to
+    # quietly drop from a chart.
+    mask = pd.Series(False, index=df.index)
+    if "dte" in df.columns:
+        mask |= pd.to_numeric(df["dte"], errors="coerce") == 0
+    for column, bound in (
+        ("atm_iv", MAX_PLAUSIBLE_IV),
+        ("skew", MAX_PLAUSIBLE_SKEW),
+        ("curvature", MAX_PLAUSIBLE_CURVATURE),
+    ):
+        if column in df.columns:
+            mask |= pd.to_numeric(df[column], errors="coerce").abs() > bound
+    return mask.fillna(False).astype(bool)

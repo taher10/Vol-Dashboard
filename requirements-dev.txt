@@ -1,0 +1,15 @@
+# Development/test-only dependencies.
+#
+# Kept out of requirements.txt so the scheduled workflows (daily-snapshot,
+# preflight-auth, data-validation) don't install a test runner they never
+# use -- those jobs are on the critical path for data collection, and every
+# extra package there is another thing that can drift and break them. That
+# isn't hypothetical: an unrelated `anthropic` upgrade pulling in httpx2
+# took the whole pipeline down on 2026-09-12.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   pytest
+
+-r requirements.txt
+
+pytest>=8.0.0

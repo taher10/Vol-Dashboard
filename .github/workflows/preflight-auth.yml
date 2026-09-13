@@ -1,0 +1,79 @@
+name: Preflight auth check
+
+# Verifies mid-session that the Schwab credentials still work, hours before
+# the day's real collection window at 21:30 UTC.
+#
+# Why: a missed session is permanent. Schwab serves current chains only, so
+# if the token is dead at 21:30 that day's data is gone and no rerun brings
+# it back -- this project has already lost two weeks that way. Every failure
+# mode hit so far (expired refresh token, undecodable SCHWAB_TOKEN_B64, a
+# dependency that broke the HTTP stack) would have shown up hours earlier
+# from one authenticated request, leaving time to fix it before the window.
+#
+# Cost is about one API call against a 768-call daily budget.
+#
+# The token_sync step below is NOT optional. Schwab rotates the refresh token
+# on every use and this runner's disk is ephemeral, so authenticating here
+# and not pushing the rotated token back would leave SCHWAB_TOKEN_B64 holding
+# a token Schwab has already invalidated -- and the evening run would then
+# fail with invalid_grant, caused by the check meant to protect it. If you
+# ever remove that step, remove this whole workflow instead.
+
+on:
+  schedule:
+    # 15:00 UTC, Mon-Fri -- ~11:00 ET, mid-session, well before the 21:30 run.
+    - cron: "0 15 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore token.json from secret
+        env:
+          SCHWAB_TOKEN_B64: ${{ secrets.SCHWAB_TOKEN_B64 }}
+        run: |
+          python -c "
+          import os
+          from src.auth import write_token_from_base64
+          write_token_from_base64(os.environ['SCHWAB_TOKEN_B64'])
+          "
+
+      - name: Verify Schwab credentials
+        env:
+          SCHWAB_API_KEY: ${{ secrets.SCHWAB_API_KEY }}
+          SCHWAB_APP_SECRET: ${{ secrets.SCHWAB_APP_SECRET }}
+          SCHWAB_CALLBACK_URL: ${{ secrets.SCHWAB_CALLBACK_URL }}
+        run: python -m src.preflight_check
+
+      # Mandatory -- see the header. Runs even when the check above failed,
+      # because if a refresh did happen before the failure, that rotated token
+      # is the only valid one left and must not be discarded.
+      - name: Persist refreshed token back to SCHWAB_TOKEN_B64
+        if: always()
+        env:
+          SECRETS_PAT: ${{ secrets.SECRETS_PAT }}
+        run: python -m src.token_sync
+
+      - name: Notify on preflight failure
+        if: failure()
+        env:
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -n "$NOTIFY_WEBHOOK_URL" ]; then
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              -d "{\"text\": \"Vol Dashboard: PREFLIGHT FAILED -- Schwab credentials are broken. Fix before 21:30 UTC or today's data is lost permanently. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\", \"content\": \"Vol Dashboard: PREFLIGHT FAILED -- Schwab credentials are broken. Fix before 21:30 UTC or today's data is lost permanently. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$NOTIFY_WEBHOOK_URL"
+          fi

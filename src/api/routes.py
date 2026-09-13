@@ -22,6 +22,7 @@ from typing import Literal
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
+from src import data_quality
 from src.data_quality import LiveDataUnavailableError
 from src.dashboard import backtest_engine, data_loader, decision_engine, insights, strategy_engine
 from src.dashboard import data_trust as data_trust_report
@@ -80,6 +81,30 @@ def _filter_metrics_by_dte(
         else:
             filtered[name] = df
     return filtered
+
+
+def _drop_degenerate(metrics: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.DataFrame], int]:
+    """Strip mathematically degenerate rows before charting, and report how
+    many went -- see data_quality.degenerate_metric_mask for what qualifies
+    and why those rows stay in the database.
+
+    The count is returned rather than discarded so the caller can surface it.
+    Quietly serving fewer points than the data holds is the kind of thing this
+    project treats as a defect: a chart that silently omits rows is only
+    better than one wrecked by a 2687% outlier if the reader is told which is
+    happening.
+    """
+    cleaned: dict[str, pd.DataFrame] = {}
+    dropped = 0
+    for name, df in metrics.items():
+        if df is not None and not df.empty:
+            mask = data_quality.degenerate_metric_mask(df)
+            if mask.any():
+                dropped += int(mask.sum())
+                cleaned[name] = df[~mask]
+                continue
+        cleaned[name] = df
+    return cleaned, dropped
 
 
 def _parse_date(value: str, label: str = "date") -> "pd.Timestamp":
@@ -742,6 +767,10 @@ def overview(
     filtered_metrics = {
         sym: _filter_metrics_by_dte(bundle.metrics, dte_min, dte_max) for sym, bundle in bundles.items()
     }
+    degenerate_dropped = 0
+    for sym, metrics in filtered_metrics.items():
+        filtered_metrics[sym], n = _drop_degenerate(metrics)
+        degenerate_dropped += n
 
     primary = requested[0] if requested[0] in bundles else next(iter(bundles))
 
@@ -801,6 +830,11 @@ def overview(
         "as_of": bundles[primary].as_of.isoformat(),
         "requested_symbols": requested,
         "missing_symbols": missing,
+        # Rows left out of the charts above as mathematically degenerate
+        # (expiration-day IV blow-ups, absurd magnitudes) -- reported so the
+        # UI can say so rather than quietly plotting fewer points than the
+        # data holds. See data_quality.degenerate_metric_mask.
+        "degenerate_rows_excluded": degenerate_dropped,
         "symbols": payload_symbols,
         "expiry_scores": df_records(expiry_scores) if expiry_scores is not None else [],
         "takeaway": takeaway,
