@@ -1,0 +1,60 @@
+name: Data collection validation
+
+# Checks that data was actually COLLECTED, which is a different question from
+# the one pipeline-heartbeat.yml answers ("did the workflow run at all").
+#
+# Why both exist, since the overlap looks redundant until it isn't:
+# heartbeat catches GitHub silently dropping a scheduled cron, where no run
+# exists to go red. This catches the opposite and much more damaging case --
+# runs happening on time, going red, and nobody reading them. That is not
+# hypothetical: between 2026-08-28 and 2026-09-11 daily-snapshot.yml ran
+# every weekday and failed every weekday. A run existed each day, so the
+# heartbeat passed for twelve consecutive days while zero data was collected,
+# and the outage was only found by inspecting the history by hand. Two weeks
+# of options data are permanently gone -- Schwab serves current chains only,
+# so there is no backfill.
+#
+# This reads the committed history/vol_history.db rather than run statuses,
+# so it is indifferent to *why* collection stopped and can't be fooled by a
+# green checkmark on a job that did nothing.
+
+on:
+  schedule:
+    # 22:45 UTC, Mon-Fri -- after daily-snapshot.yml (21:30) has run and
+    # committed, and after pipeline-heartbeat.yml (22:15).
+    - cron: "45 22 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      # No lfs: true -- this only reads history/vol_history.db, which is a
+      # normal git object. database/schwab_database.db is LFS-tracked and
+      # isn't needed here, so skipping LFS keeps this job fast and removes a
+      # dependency on the LFS quota being intact.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate data collection
+        run: python -m src.validate_collection --max-stale-days 3
+
+      - name: Notify on validation failure
+        if: failure()
+        env:
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -n "$NOTIFY_WEBHOOK_URL" ]; then
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              -d "{\"text\": \"Vol Dashboard: data collection validation FAILED -- symbols are missing recent data. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\", \"content\": \"Vol Dashboard: data collection validation FAILED -- symbols are missing recent data. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$NOTIFY_WEBHOOK_URL"
+          fi
