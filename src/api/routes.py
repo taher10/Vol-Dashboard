@@ -413,6 +413,18 @@ def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta:
         "est_max_loss": clean_value(est_max_loss),
         "net_vega_pnl": clean_value(candidate.variance_edge["net_vega_pnl"]),
         "edge_per_capital_pct": edge_per_capital_pct,
+        # When the underlying snapshot was taken. The ranking is only as
+        # current as the data behind it, and nothing on this page said so.
+        "as_of": bundle.as_of.isoformat(),
+        # The full structure -- both legs (strike, IV, vega, mid) and the
+        # variance_edge decomposition the ranking is built from. Already
+        # computed above; serializing it lets the UI show *why* a symbol
+        # ranks where it does instead of asking the reader to trust one
+        # aggregate number. Note payoff/max_profit/breakevens are empty for
+        # calendars by design (see build_calendar_call) -- there is no
+        # honest payoff curve without a pricing model, so don't try to plot
+        # one from this.
+        "candidate": _candidate_record(candidate),
     }
 
 

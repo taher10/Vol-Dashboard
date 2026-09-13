@@ -326,6 +326,14 @@ export interface CalendarEdgeRow {
   /** Modeled edge as a % of capital required -- a more comparable ranking
    * than the raw dollar edge alone. Null when est_max_loss is 0/unavailable. */
   edge_per_capital_pct: number | null;
+  /** When the underlying snapshot was taken. The ranking is only as current
+   * as the data behind it. */
+  as_of: string;
+  /** The full structure behind the ranking -- both legs and the
+   * variance_edge decomposition. Note payoff/max_profit/breakevens are
+   * empty for calendars by design: there's no honest payoff curve without
+   * an options-pricing model, so don't plot one from this. */
+  candidate: StrategyCandidate;
 }
 
 export interface TermStructureRow {
@@ -571,8 +579,12 @@ export const api = {
 
   scannerPcr: (expiration?: string) => apiGet<PcrResponse>("/api/scanner/pcr", { expiration }),
 
-  calendarEdge: (frontDte = 7, backDte = 30) =>
-    apiGet<CalendarEdgeResponse>("/api/scanner/calendar-edge", { front_dte: frontDte, back_dte: backDte }),
+  calendarEdge: (frontDte = 7, backDte = 30, targetDelta = 0.25) =>
+    apiGet<CalendarEdgeResponse>("/api/scanner/calendar-edge", {
+      front_dte: frontDte,
+      back_dte: backDte,
+      target_delta: targetDelta,
+    }),
 
   termStructure: (nearDte = 7, farDte = 60) =>
     apiGet<TermStructureResponse>("/api/scanner/term-structure", { near_dte: nearDte, far_dte: farDte }),
