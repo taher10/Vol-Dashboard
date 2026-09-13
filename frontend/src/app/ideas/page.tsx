@@ -74,11 +74,11 @@ function IdeaCard({ idea }: { idea: TradeIdea }) {
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Max profit</div>
-          <div className="font-mono font-semibold text-[#0b5c0b]">{fmtNum(idea.max_profit, 2)}</div>
+          <div className="font-mono font-semibold text-pos">{fmtNum(idea.max_profit, 2)}</div>
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Max loss</div>
-          <div className="font-mono font-semibold text-[#8f2323]">{fmtNum(idea.max_loss, 2)}</div>
+          <div className="font-mono font-semibold text-neg">{fmtNum(idea.max_loss, 2)}</div>
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Reward:Risk</div>

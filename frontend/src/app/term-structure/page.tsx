@@ -168,7 +168,7 @@ export default function TermStructurePage() {
                       <TableCell
                         className={cn(
                           "text-right font-mono tabular-nums",
-                          row.iv_slope >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]"
+                          row.iv_slope >= 0 ? "text-pos" : "text-neg"
                         )}
                       >
                         {fmtSigned(row.iv_slope, 2)}
@@ -178,7 +178,7 @@ export default function TermStructurePage() {
                       <TableCell
                         className={cn(
                           "text-right font-mono tabular-nums",
-                          row.skew_slope >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]"
+                          row.skew_slope >= 0 ? "text-pos" : "text-neg"
                         )}
                       >
                         {fmtSigned(row.skew_slope, 2)}

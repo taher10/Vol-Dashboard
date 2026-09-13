@@ -20,7 +20,7 @@ export function AppSidebar() {
         <div className="flex size-6 items-center justify-center rounded-md bg-sidebar-primary text-xs font-bold text-sidebar-primary-foreground">
           V
         </div>
-        <span className="text-sm font-semibold tracking-tight">Vol Dashboard</span>
+        <span className="text-[13px] font-semibold tracking-tight">Vol Dashboard</span>
       </div>
 
       <div className="px-3 pb-3">
@@ -41,13 +41,15 @@ export function AppSidebar() {
               key={item.href}
               href={href}
               className={cn(
-                "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                "relative flex items-center gap-2.5 rounded-md px-3 py-2 text-[13px] transition-colors",
+                "before:absolute before:left-0 before:top-1/2 before:h-4 before:w-0.5 before:-translate-y-1/2",
+                "before:rounded-r before:transition-colors",
                 active
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+                  ? "bg-sidebar-accent/70 font-medium text-sidebar-accent-foreground before:bg-sidebar-primary"
+                  : "font-normal text-sidebar-foreground/65 before:bg-transparent hover:bg-sidebar-accent/40 hover:text-sidebar-foreground"
               )}
             >
-              <Icon className="size-4" />
+              <Icon className={cn("size-4 shrink-0", active ? "text-sidebar-primary" : "opacity-60")} />
               {item.label}
             </Link>
           );

@@ -96,7 +96,7 @@ function StructureDetail({ row }: { row: CalendarEdgeRow }) {
           <tbody className="font-mono tabular-nums">
             {row.candidate.legs.map((leg, i) => (
               <tr key={i}>
-                <td className={cn("text-left font-sans", leg.action === "sell" ? "text-[#8f2323]" : "text-[#0b5c0b]")}>
+                <td className={cn("text-left font-sans", leg.action === "sell" ? "text-neg" : "text-pos")}>
                   {leg.action} {leg.optionType.toLowerCase()}
                 </td>
                 <td className="pl-6 text-right">{fmtNum(leg.strike, 0)}</td>
@@ -136,13 +136,13 @@ function StructureDetail({ row }: { row: CalendarEdgeRow }) {
                 </tr>
                 <tr>
                   <td className="text-left font-sans text-muted-foreground">Front leg P&amp;L (crush × vega)</td>
-                  <td className={cn("pl-6 text-right", ve.front_vega_pnl >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]")}>
+                  <td className={cn("pl-6 text-right", ve.front_vega_pnl >= 0 ? "text-pos" : "text-neg")}>
                     {fmtSigned(ve.front_vega_pnl, 0)}
                   </td>
                 </tr>
                 <tr>
                   <td className="text-left font-sans text-muted-foreground">Back leg P&amp;L (crush × vega)</td>
-                  <td className={cn("pl-6 text-right", ve.back_vega_pnl >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]")}>
+                  <td className={cn("pl-6 text-right", ve.back_vega_pnl >= 0 ? "text-pos" : "text-neg")}>
                     {fmtSigned(ve.back_vega_pnl, 0)}
                   </td>
                 </tr>
@@ -151,7 +151,7 @@ function StructureDetail({ row }: { row: CalendarEdgeRow }) {
                   <td
                     className={cn(
                       "pl-6 text-right font-medium",
-                      ve.net_vega_pnl >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]"
+                      ve.net_vega_pnl >= 0 ? "text-pos" : "text-neg"
                     )}
                   >
                     {fmtSigned(ve.net_vega_pnl, 0)}
@@ -361,13 +361,13 @@ export default function CalendarMathPage() {
                         <TableCell className="text-right font-mono tabular-nums">
                           {fmtUsd(row.net_debit_credit)}
                         </TableCell>
-                        <TableCell className="text-right font-mono tabular-nums text-[#8f2323]">
+                        <TableCell className="text-right font-mono tabular-nums text-neg">
                           {fmtUsd(row.est_max_loss)}
                         </TableCell>
                         <TableCell
                           className={cn(
                             "text-right font-mono tabular-nums",
-                            row.net_vega_pnl >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]"
+                            row.net_vega_pnl >= 0 ? "text-pos" : "text-neg"
                           )}
                         >
                           {fmtSigned(row.net_vega_pnl, 0)}

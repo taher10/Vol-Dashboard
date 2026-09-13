@@ -28,9 +28,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
+    // `dark` is applied unconditionally rather than following the OS setting:
+    // this is a trading terminal that gets stared at for hours, the palette is
+    // tuned specifically for a near-black ground, and a surprise light render
+    // on someone's daytime machine would show colours that were never designed
+    // against white. One deliberate look, not two half-maintained ones.
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="h-full">
         <TooltipProvider delayDuration={150}>
