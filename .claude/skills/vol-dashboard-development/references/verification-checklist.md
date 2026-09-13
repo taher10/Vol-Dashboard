@@ -34,6 +34,14 @@ cd frontend && ./dev-with-node20.sh &
 
 Browser tabs that were open *during* a dev-server restart accumulate stale error messages (failed HMR websocket reconnects, 404s from the moment the server was down) that look like real bugs but aren't. Before concluding there's a real console error, open a brand new tab and reload the page there — if the error doesn't reproduce in the fresh tab, it was stale noise from the restart, not a real regression. This has produced false alarms more than once; always confirm in a fresh tab before reporting an error as real.
 
-## 5. Confirm you didn't break anything already working
+## 5. Run the exact command CI runs, not a convenient equivalent
+
+When you add or change something CI executes, run the *literal* command from the workflow YAML. A near-equivalent can pass locally while the real one fails, and you won't find out until the run goes red.
+
+This has already happened here: the pytest suite was verified with `python -m pytest` (56 passed) while `tests.yml` ran bare `pytest`. The `-m` form implicitly puts the working directory on `sys.path` and the bare entry point does not, so CI died at collection with `ModuleNotFoundError: No module named 'src'` — exit code 2, which is pytest's "interrupted/collection error" rather than the exit 1 you get from failing tests. Fixed with `pythonpath = .` in `pytest.ini`, which makes both invocations work.
+
+Worth pairing with step 6 below: for anything that runs in CI, "it works on my machine" is two assumptions, the command *and* the environment, and both have broken this project.
+
+## 6. Confirm you didn't break anything already working
 
 If the change touches a shared piece (a format helper, a type used in multiple places, a route other pages depend on), spot-check at least one of those other consumers still works — don't assume isolation. Example: relaxing `StrategyCandidate.max_profit`/`max_loss` to nullable (for calendars) required checking Strategy Builder and the Trade Ideas panel still rendered correctly, since they consume the same type.
