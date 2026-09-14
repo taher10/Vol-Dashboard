@@ -738,18 +738,56 @@ def _strike_profile_snapshot(symbol: str, expiration: str | None) -> dict:
 
 
 @router.get("/surface")
-def surface(symbol: str = Query(...)) -> dict:
+def surface(symbol: str = Query(...), compare: str | None = Query(None)) -> dict:
     """IV by (dte, moneyness) for one symbol -- the raw surface the term
-    structure and skew summaries are computed from."""
+    structure and skew summaries are computed from.
+
+    With `compare=YYYY-MM-DD`, also returns how the surface repriced since
+    that stored snapshot. The list of dates that can actually be compared
+    against is returned either way: the daily pipeline has real gaps (see
+    known-issues.md), so "a week ago" frequently doesn't exist and the
+    caller needs to see what does before asking for it.
+    """
     symbol = symbol.upper()
     if symbol not in SYMBOL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
     bundle = _load_bundle(symbol)
-    return {
+    spot = _underlying_price(bundle.chain)
+    payload = {
         "symbol": symbol,
         "as_of": bundle.as_of.isoformat(),
-        **vol_surface.build_surface(bundle.chain, _underlying_price(bundle.chain), _live_dte),
+        **vol_surface.build_surface(bundle.chain, spot, _live_dte),
     }
+
+    db = SchwabDatabase()
+    today = date.today()
+    stored = [d for d in db.options_snapshot_dates(symbol) if d < today]
+    payload["available_compare_dates"] = [d.isoformat() for d in reversed(stored)]
+    payload["comparison"] = None
+
+    if compare:
+        try:
+            compare_date = date.fromisoformat(compare)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid compare date '{compare}'.") from exc
+        prior_raw = db.options_snapshot(symbol, compare_date)
+        if prior_raw is None or prior_raw.empty:
+            raise HTTPException(status_code=404, detail=f"No stored chain for {symbol} on {compare}.")
+        prior = vol_surface.normalize_stored_chain(prior_raw)
+        prior_spot_values = prior["underlyingPrice"].dropna() if "underlyingPrice" in prior.columns else None
+        prior_spot = float(prior_spot_values.iloc[0]) if prior_spot_values is not None and not prior_spot_values.empty else None
+        result = vol_surface.build_comparison(bundle.chain, prior, spot, prior_spot, _live_dte)
+        payload["comparison"] = {
+            "compare_date": compare,
+            # The real elapsed gap, not an assumed week. The pipeline's
+            # outages mean the nearest available snapshot is often much
+            # further back than the user intends to ask for.
+            "days_elapsed": (today - compare_date).days,
+            "prior_spot": prior_spot,
+            "spot_change_pct": ((spot - prior_spot) / prior_spot * 100) if spot and prior_spot else None,
+            **result,
+        }
+    return payload
 
 
 @router.get("/scanner/strike-profile")
