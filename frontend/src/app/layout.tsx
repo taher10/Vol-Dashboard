@@ -4,6 +4,7 @@ import "./globals.css";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { ChatPanel } from "@/components/chat-panel";
+import { CommandPalette } from "@/components/command-palette";
 import { SymbolRouteSync } from "@/components/symbol-route-sync";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -40,6 +41,7 @@ export default function RootLayout({
       <body className="h-full">
         <TooltipProvider delayDuration={150}>
           <SymbolRouteSync />
+          <CommandPalette />
           <div className="flex h-screen overflow-hidden bg-background">
             <AppSidebar />
             <div className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</div>

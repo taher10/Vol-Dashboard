@@ -7,6 +7,9 @@ import { SymbolPicker } from "@/components/symbol-picker";
 import { RefreshButton } from "@/components/refresh-button";
 import { useSettingsStore, primarySymbol } from "@/lib/store";
 import { NAV } from "@/lib/nav";
+import { Search } from "lucide-react";
+
+import { openCommandPalette } from "@/components/command-palette";
 import { cn } from "@/lib/utils";
 
 export function AppSidebar() {
@@ -56,8 +59,22 @@ export function AppSidebar() {
         })}
       </nav>
 
-      <div className="mt-auto flex flex-col gap-1 px-4 py-4 text-xs text-sidebar-foreground/50">
-        <span>Personal use — real snapshot data</span>
+      <div className="mt-auto flex flex-col gap-2 px-3 py-4">
+        {/* The shortcut is the point of a palette, but an unadvertised
+            shortcut is one nobody uses -- this both announces it and works
+            as a click target for anyone who'd rather not learn it. */}
+        <button
+          type="button"
+          onClick={openCommandPalette}
+          className="flex items-center gap-2 rounded-md border border-sidebar-border/70 px-2.5 py-1.5 text-xs text-sidebar-foreground/55 transition-colors hover:border-sidebar-border hover:text-sidebar-foreground"
+        >
+          <Search className="size-3.5 shrink-0" />
+          <span>Jump to…</span>
+          <kbd className="ml-auto rounded border border-sidebar-border/80 px-1 py-px font-mono text-[10px] text-sidebar-foreground/60">
+            ⌘K
+          </kbd>
+        </button>
+        <span className="px-1 text-[11px] text-sidebar-foreground/40">Personal use — real snapshot data</span>
       </div>
     </aside>
   );
