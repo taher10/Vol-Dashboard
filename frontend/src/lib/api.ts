@@ -309,6 +309,29 @@ export interface ScannerResponse {
   rows: ScannerRow[];
 }
 
+export interface SurfaceCell {
+  dte: number;
+  /** strike / spot - 1, snapped to a 2.5% bucket so expirations share one axis. */
+  moneyness: number;
+  iv: number;
+  /** Which side the quote came from -- OTM only, so puts below spot and calls
+   * above. ITM quotes are wide and intrinsic-dominated and would put a
+   * spurious step at the money. */
+  side: "CALL" | "PUT";
+  contracts: number;
+}
+
+export interface SurfaceResponse {
+  symbol: string;
+  as_of: string;
+  spot: number | null;
+  expirations: { dte: number; expiration: string }[];
+  moneyness: number[];
+  cells: SurfaceCell[];
+  iv_min: number | null;
+  iv_max: number | null;
+}
+
 export interface CalendarEdgeRow {
   symbol: string;
   color: string;
@@ -588,6 +611,8 @@ export const api = {
 
   termStructure: (nearDte = 7, farDte = 60) =>
     apiGet<TermStructureResponse>("/api/scanner/term-structure", { near_dte: nearDte, far_dte: farDte }),
+
+  surface: (symbol: string) => apiGet<SurfaceResponse>("/api/surface", { symbol }),
 
   scannerStrikeProfile: (symbol: string, expiration?: string) =>
     apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),
