@@ -8,6 +8,7 @@ import { ChartCard } from "@/components/chart-card";
 import { ChartLegend, MetricLineChart, type MetricSeries } from "@/components/charts/metric-line-chart";
 import { InsightPanel } from "@/components/insight-panel";
 import { RichnessTable } from "@/components/richness-table";
+import { MarketPulse } from "@/components/market-pulse";
 import { StatCard } from "@/components/stat-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -98,6 +99,8 @@ export default function OverviewPage() {
             No saved snapshot yet for: {data.missing_symbols.join(", ")}
           </div>
         )}
+
+        <MarketPulse />
 
         <div className="mb-4 flex flex-wrap items-center gap-3">
           {loading && !data ? (

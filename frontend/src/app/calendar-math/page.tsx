@@ -3,7 +3,9 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight } from "lucide-react";
 
+import { BarCell } from "@/components/bar-cell";
 import { ChartCard } from "@/components/chart-card";
+import { PageIntro } from "@/components/page-intro";
 import { SiteHeader } from "@/components/site-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -214,6 +216,14 @@ export default function CalendarMathPage() {
     };
   }, [frontDte, backDte, targetDelta]);
 
+  const scales = useMemo(
+    () => ({
+      edge: Math.max(...rows.map((r) => Math.abs(r.net_vega_pnl)), 0),
+      perCapital: Math.max(...rows.map((r) => Math.abs(r.edge_per_capital_pct ?? 0)), 0),
+    }),
+    [rows]
+  );
+
   const barRows: VolBarRow[] = useMemo(
     () => rows.map((r) => ({ symbol: r.symbol, color: r.color, value: r.net_vega_pnl })),
     [rows]
@@ -250,18 +260,32 @@ export default function CalendarMathPage() {
     <>
       <SiteHeader title="Calendar Math" />
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
-        <p className="mb-3 text-xs text-muted-foreground">
-          A sell-front/buy-back-month calendar call spread, ranked by a MODELED estimate -- a forward-variance
-          decomposition using each leg&apos;s real recorded IV and broker-supplied vega, not a guarantee or a
-          backtested win rate. Net debit is the real capital required. Est. max loss is a genuine worst-case UPPER
-          BOUND -- real strike/premium algebra (a big enough move can lose more than the debit when front/back strikes
-          differ, since legs are delta-matched rather than same-strike), conservatively ignoring the back leg&apos;s
-          remaining time value, so the true worst case is typically a bit lower than shown, never higher. Max profit
-          isn&apos;t shown -- unlike max loss, it&apos;s reached at an interior stock price rather than a boundary, so
-          there&apos;s no honest number for it without a real options-pricing model. Click any row to see both legs
-          and how the edge was derived. For a real (if short) track record of an actual trade, run it on the Backtest
-          page.
-        </p>
+        <PageIntro
+          summary={
+            <>
+              Sell-front / buy-back calendar call spreads across all tracked symbols, ranked by modeled
+              variance edge. Click any row for the legs and the derivation.
+            </>
+          }
+        >
+          <p className="mb-2">
+            The ranking is a MODELED estimate -- a forward-variance decomposition using each leg&apos;s real
+            recorded IV and broker-supplied vega. It is not a guarantee and not a backtested win rate. For a real
+            (if short) track record of an actual trade, run it on the Backtest page.
+          </p>
+          <p className="mb-2">
+            <span className="text-foreground">Net debit</span> is the real capital required.{" "}
+            <span className="text-foreground">Est. max loss</span> is a genuine worst-case UPPER BOUND from real
+            strike/premium algebra -- a big enough move can lose more than the debit when front and back strikes
+            differ, since legs are delta-matched rather than same-strike. It conservatively ignores the back
+            leg&apos;s remaining time value, so the true worst case is typically a bit lower than shown, never
+            higher.
+          </p>
+          <p>
+            Max profit is deliberately absent. Unlike max loss it is reached at an interior stock price rather
+            than at a boundary, so there is no honest number for it without a real options-pricing model.
+          </p>
+        </PageIntro>
 
         <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-2">
           <Control
@@ -364,16 +388,15 @@ export default function CalendarMathPage() {
                         <TableCell className="text-right font-mono tabular-nums text-neg">
                           {fmtUsd(row.est_max_loss)}
                         </TableCell>
-                        <TableCell
-                          className={cn(
-                            "text-right font-mono tabular-nums",
-                            row.net_vega_pnl >= 0 ? "text-pos" : "text-neg"
-                          )}
-                        >
-                          {fmtSigned(row.net_vega_pnl, 0)}
+                        <TableCell className="text-right">
+                          <BarCell value={row.net_vega_pnl} max={scales.edge} digits={0} />
                         </TableCell>
-                        <TableCell className="text-right font-mono tabular-nums">
-                          {row.edge_per_capital_pct != null ? `${fmtSigned(row.edge_per_capital_pct, 1)}%` : "—"}
+                        <TableCell className="text-right">
+                          <BarCell
+                            value={row.edge_per_capital_pct}
+                            max={scales.perCapital}
+                            format={(v) => `${fmtSigned(v, 1)}%`}
+                          />
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {fmtDate(row.front_expiration)} (DTE {row.front_dte})
