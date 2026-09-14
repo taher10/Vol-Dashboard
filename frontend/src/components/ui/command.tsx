@@ -48,10 +48,6 @@ function CommandDialog({
 }) {
   return (
     <Dialog {...props}>
-      <DialogHeader className="sr-only">
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>{description}</DialogDescription>
-      </DialogHeader>
       <DialogContent
         className={cn(
           "top-1/3 translate-y-0 overflow-hidden rounded-xl! p-0",
@@ -59,7 +55,26 @@ function CommandDialog({
         )}
         showCloseButton={showCloseButton}
       >
-        {children}
+        {/* Title/description must live INSIDE DialogContent. Radix registers
+            them against the content's context for aria-labelledby, so as
+            siblings that context is undefined and the dialog throws
+            "Cannot read properties of undefined (reading 'subscribe')" the
+            first time it opens. They were scaffolded outside it, and since
+            nothing in this app had used CommandDialog until now, the broken
+            path had never run. */}
+        <DialogHeader className="sr-only">
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        {/* The <Command> root is required: CommandInput/CommandList/CommandItem
+            read cmdk's store from its context, and without it useSyncExternalStore
+            is handed an undefined store -- "Cannot read properties of undefined
+            (reading 'subscribe')" the moment the dialog opens. It was missing
+            from the scaffolded component, and since nothing here had used
+            CommandDialog before, the broken path never ran. */}
+        <Command className="[&_[cmdk-group-heading]]:text-muted-foreground **:data-[slot=command-input-wrapper]:h-12 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group]]:px-2 [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-input-wrapper]_svg]:h-5 [&_[cmdk-input-wrapper]_svg]:w-5 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-3 [&_[cmdk-item]_svg]:h-5 [&_[cmdk-item]_svg]:w-5">
+          {children}
+        </Command>
       </DialogContent>
     </Dialog>
   )

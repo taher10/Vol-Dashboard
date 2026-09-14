@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp } from "lucide-react";
 
+import { BarCell } from "@/components/bar-cell";
 import { ChartCard } from "@/components/chart-card";
+import { PageIntro } from "@/components/page-intro";
 import { SiteHeader } from "@/components/site-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -49,6 +51,14 @@ export default function TermStructurePage() {
     };
   }, []);
 
+  const scales = useMemo(
+    () => ({
+      iv: Math.max(...rows.map((r) => Math.abs(r.iv_slope)), 0),
+      skew: Math.max(...rows.map((r) => Math.abs(r.skew_slope)), 0),
+    }),
+    [rows]
+  );
+
   const ivSlopeBarRows: VolBarRow[] = useMemo(
     () => rows.map((r) => ({ symbol: r.symbol, color: r.color, value: r.iv_slope })),
     [rows]
@@ -85,13 +95,13 @@ export default function TermStructurePage() {
     <>
       <SiteHeader title="Term Structure" />
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
-        <p className="mb-4 text-xs text-muted-foreground">
-          Near (~7 DTE) vs. far (~60 DTE) ATM IV and 25Δ skew per symbol, ranked by slope. IV slope positive means
+        <PageIntro summary={<>Near vs far ATM IV and 25Δ skew per symbol, ranked by slope.</>}>
+          <p>Near (~7 DTE) vs. far (~60 DTE) ATM IV and 25Δ skew per symbol, ranked by slope. IV slope positive means
           far-dated IV is priced above near-dated (normal/contango); negative means inverted (near-dated richer --
           often an event/earnings signal). Skew slope shows whether downside skew gets more or less pronounced
           further out. All real numbers off the same term-structure/skew curves Overview plots, not a modeled
-          estimate.
-        </p>
+          estimate.</p>
+        </PageIntro>
 
         {error && (
           <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -165,23 +175,13 @@ export default function TermStructurePage() {
                       </TableCell>
                       <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.near_iv, 2)}</TableCell>
                       <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.far_iv, 2)}</TableCell>
-                      <TableCell
-                        className={cn(
-                          "text-right font-mono tabular-nums",
-                          row.iv_slope >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]"
-                        )}
-                      >
-                        {fmtSigned(row.iv_slope, 2)}
+                      <TableCell className="text-right">
+                        <BarCell value={row.iv_slope} max={scales.iv} digits={2} />
                       </TableCell>
                       <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.near_skew, 2)}</TableCell>
                       <TableCell className="text-right font-mono tabular-nums">{fmtNum(row.far_skew, 2)}</TableCell>
-                      <TableCell
-                        className={cn(
-                          "text-right font-mono tabular-nums",
-                          row.skew_slope >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]"
-                        )}
-                      >
-                        {fmtSigned(row.skew_slope, 2)}
+                      <TableCell className="text-right">
+                        <BarCell value={row.skew_slope} max={scales.skew} digits={2} />
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {row.near_dte}d / {row.far_dte}d

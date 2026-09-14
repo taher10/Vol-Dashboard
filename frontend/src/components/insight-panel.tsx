@@ -34,8 +34,8 @@ export function InsightPanel({ commentary, symbol }: { commentary: Commentary; s
               </span>
             ))}
           </span>
-          <span className="text-[#0b5c0b]">Max P {fmtNum(trade.max_profit, 2)}</span>
-          <span className="text-[#8f2323]">Max L {fmtNum(trade.max_loss, 2)}</span>
+          <span className="text-pos">Max P {fmtNum(trade.max_profit, 2)}</span>
+          <span className="text-neg">Max L {fmtNum(trade.max_loss, 2)}</span>
           <span className="text-muted-foreground">
             POP~ {trade.approx_pop != null ? fmtPct(trade.approx_pop * 100, 0) : "—"}
           </span>

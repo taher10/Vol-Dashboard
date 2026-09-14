@@ -6,6 +6,7 @@ import { ArrowDown, ArrowUp } from "lucide-react";
 
 import { ChartCard } from "@/components/chart-card";
 import { InfoHint } from "@/components/info-hint";
+import { PageIntro } from "@/components/page-intro";
 import { SiteHeader } from "@/components/site-header";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -165,11 +166,11 @@ export default function ScannerPage() {
     <>
       <SiteHeader title="Vol Scanner" />
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
-        <p className="mb-4 text-xs text-muted-foreground">
-          One representative (~30 DTE) expiry per symbol, sortable -- click a column header to sort, click a row to
+        <PageIntro summary={<>One representative (~30 DTE) expiry per symbol. Click a column to sort, click a row to open Strategy Builder.</>}>
+          <p>One representative (~30 DTE) expiry per symbol, sortable -- click a column header to sort, click a row to
           open its Strategy Builder. Symbols with little recorded history show blanks where a signal needs more days
-          to compute (see the History column), not zeros.
-        </p>
+          to compute (see the History column), not zeros.</p>
+        </PageIntro>
 
         {error && (
           <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">

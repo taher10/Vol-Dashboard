@@ -326,23 +326,14 @@ export interface CalendarEdgeRow {
   /** Modeled edge as a % of capital required -- a more comparable ranking
    * than the raw dollar edge alone. Null when est_max_loss is 0/unavailable. */
   edge_per_capital_pct: number | null;
-}
-
-export interface DeltaNeutralRow {
-  symbol: string;
-  color: string;
-  expiration: string;
-  dte: number;
-  richness_z: number;
-  richness_label: string | null;
-  action: "buy" | "sell";
+  /** When the underlying snapshot was taken. The ranking is only as current
+   * as the data behind it. */
+  as_of: string;
+  /** The full structure behind the ranking -- both legs and the
+   * variance_edge decomposition. Note payoff/max_profit/breakevens are
+   * empty for calendars by design: there's no honest payoff curve without
+   * an options-pricing model, so don't plot one from this. */
   candidate: StrategyCandidate;
-}
-
-export interface DeltaNeutralResponse {
-  target_dte: number;
-  target_delta: number;
-  rows: DeltaNeutralRow[];
 }
 
 export interface TermStructureRow {
@@ -365,54 +356,6 @@ export interface TermStructureResponse {
   near_dte: number;
   far_dte: number;
   rows: TermStructureRow[];
-}
-
-export interface GammaExposureRow {
-  symbol: string;
-  color: string;
-  expiration: string;
-  dte: number;
-  underlying_price: number;
-  /** Unsigned dollar-gamma magnitude summed across calls+puts at this
-   * expiration -- NOT signed/netted "dealer positioning": open interest
-   * alone doesn't say which side of a contract dealers are on, so no
-   * directional claim is made here, only concentration. */
-  total_gamma_exposure: number;
-  /** Strike where gamma x OI is most concentrated -- a candidate pin level. */
-  peak_strike: number;
-  peak_strike_distance_pct: number;
-}
-
-export interface GammaExposureResponse {
-  target_dte: number;
-  rows: GammaExposureRow[];
-}
-
-export interface DataTrustRow {
-  symbol: string;
-  color: string;
-  last_snapshot_date: string | null;
-  /** Age in trading days, not calendar days -- a Friday snapshot read on
-   * Monday is 1 trading day old, not 3. */
-  age_trading_days: number | null;
-  n_observations: number;
-  days_covered_in_window: number;
-  largest_gap_trading_days: number;
-  covered_days: string[];
-  /** 100/n -- the finest a percentile can resolve with this many
-   * observations. A real derived fact, not a confidence score. */
-  percentile_resolution_pts: number | null;
-}
-
-export interface DataTrustResponse {
-  today: string;
-  calendar: string[];
-  symbol_count: number;
-  symbols_reporting_per_day: Record<string, number>;
-  complete_run_threshold: number;
-  latest_complete_run: string | null;
-  trading_days_since_complete_run: number | null;
-  rows: DataTrustRow[];
 }
 
 export interface CalendarEdgeResponse {
@@ -636,20 +579,15 @@ export const api = {
 
   scannerPcr: (expiration?: string) => apiGet<PcrResponse>("/api/scanner/pcr", { expiration }),
 
-  calendarEdge: (frontDte = 7, backDte = 30) =>
-    apiGet<CalendarEdgeResponse>("/api/scanner/calendar-edge", { front_dte: frontDte, back_dte: backDte }),
-
-  deltaNeutral: (targetDte = 30, targetDelta = 0.5) =>
-    apiGet<DeltaNeutralResponse>("/api/scanner/delta-neutral", { target_dte: targetDte, target_delta: targetDelta }),
+  calendarEdge: (frontDte = 7, backDte = 30, targetDelta = 0.25) =>
+    apiGet<CalendarEdgeResponse>("/api/scanner/calendar-edge", {
+      front_dte: frontDte,
+      back_dte: backDte,
+      target_delta: targetDelta,
+    }),
 
   termStructure: (nearDte = 7, farDte = 60) =>
     apiGet<TermStructureResponse>("/api/scanner/term-structure", { near_dte: nearDte, far_dte: farDte }),
-
-  gammaExposure: (targetDte = 30) =>
-    apiGet<GammaExposureResponse>("/api/scanner/gamma-exposure", { target_dte: targetDte }),
-
-  dataTrust: (windowTradingDays = 45) =>
-    apiGet<DataTrustResponse>("/api/data-trust", { window_trading_days: windowTradingDays }),
 
   scannerStrikeProfile: (symbol: string, expiration?: string) =>
     apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),

@@ -5,6 +5,7 @@ import Link from "next/link";
 
 import { PayoffChart } from "@/components/charts/payoff-chart";
 import { InfoHint } from "@/components/info-hint";
+import { PageIntro } from "@/components/page-intro";
 import { SiteHeader } from "@/components/site-header";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -74,11 +75,11 @@ function IdeaCard({ idea }: { idea: TradeIdea }) {
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Max profit</div>
-          <div className="font-mono font-semibold text-[#0b5c0b]">{fmtNum(idea.max_profit, 2)}</div>
+          <div className="font-mono font-semibold text-pos">{fmtNum(idea.max_profit, 2)}</div>
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Max loss</div>
-          <div className="font-mono font-semibold text-[#8f2323]">{fmtNum(idea.max_loss, 2)}</div>
+          <div className="font-mono font-semibold text-neg">{fmtNum(idea.max_loss, 2)}</div>
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Reward:Risk</div>
@@ -166,13 +167,13 @@ export default function TradeIdeasPage() {
     <>
       <SiteHeader title="Trade Ideas" />
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
-        <p className="mb-4 text-xs text-muted-foreground">
-          The 8 symbols with the strongest richness signal today, ranked -- same math Strategy Builder uses, not a
+        <PageIntro summary={<>The 8 symbols with the strongest richness signal today.</>}>
+          <p>The 8 symbols with the strongest richness signal today, ranked -- same math Strategy Builder uses, not a
           separate estimate. Symbols with a balanced smile (no clear edge) never appear here. Credit spreads (selling
           premium) only show up when IV reads Rich or Neutral; on a day where IV is cheap across most of the tracked
           universe, expect an all-debit page -- that's buying cheap premium, which is the correct side to be on when
-          nothing is actually rich, not a bug.
-        </p>
+          nothing is actually rich, not a bug.</p>
+        </PageIntro>
 
         <div className="mb-4 flex flex-wrap items-center gap-6 rounded-lg border border-border bg-card p-4">
           <div className="flex flex-col gap-1.5">

@@ -21,7 +21,7 @@ function CustomTooltip({ active, payload }: { active?: boolean; payload?: { payl
   return (
     <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs shadow-md">
       <div className="font-medium text-popover-foreground">Underlying ${fmtNum(p.underlying, 2)}</div>
-      <div className={p.pnl >= 0 ? "text-[#0b5c0b]" : "text-[#8f2323]"}>P/L {fmtNum(p.pnl, 2)}</div>
+      <div className={p.pnl >= 0 ? "text-pos" : "text-neg"}>P/L {fmtNum(p.pnl, 2)}</div>
     </div>
   );
 }

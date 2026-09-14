@@ -30,7 +30,7 @@ export function TradeCard({ candidate }: { candidate: StrategyCandidate }) {
             <span
               className={cn(
                 "w-10 font-mono text-xs font-semibold",
-                leg.action === "buy" ? "text-[#0b5c0b]" : "text-[#8f2323]"
+                leg.action === "buy" ? "text-pos" : "text-neg"
               )}
             >
               {leg.action === "buy" ? "BUY" : "SELL"}
@@ -62,7 +62,7 @@ export function TradeCard({ candidate }: { candidate: StrategyCandidate }) {
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Max loss (worst case)</div>
-              <div className="font-mono font-semibold text-[#8f2323]">{fmtUsd(candidate.max_loss)}</div>
+              <div className="font-mono font-semibold text-neg">{fmtUsd(candidate.max_loss)}</div>
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Modeled edge (IV-crush estimate)</div>
@@ -70,8 +70,8 @@ export function TradeCard({ candidate }: { candidate: StrategyCandidate }) {
                 className={cn(
                   "font-mono font-semibold",
                   candidate.variance_edge != null && candidate.variance_edge.net_vega_pnl >= 0
-                    ? "text-[#0b5c0b]"
-                    : "text-[#8f2323]"
+                    ? "text-pos"
+                    : "text-neg"
                 )}
               >
                 {candidate.variance_edge != null ? fmtUsd(candidate.variance_edge.net_vega_pnl) : "No signal"}
@@ -104,11 +104,11 @@ export function TradeCard({ candidate }: { candidate: StrategyCandidate }) {
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Max profit</div>
-              <div className="font-mono font-semibold text-[#0b5c0b]">{fmtUsd(candidate.max_profit)}</div>
+              <div className="font-mono font-semibold text-pos">{fmtUsd(candidate.max_profit)}</div>
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Max loss</div>
-              <div className="font-mono font-semibold text-[#8f2323]">{fmtUsd(candidate.max_loss)}</div>
+              <div className="font-mono font-semibold text-neg">{fmtUsd(candidate.max_loss)}</div>
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Approx. POP</div>
