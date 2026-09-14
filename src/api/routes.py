@@ -26,6 +26,7 @@ from src import data_quality
 from src.data_quality import LiveDataUnavailableError
 from src.dashboard import backtest_engine, data_loader, decision_engine, insights, strategy_engine
 from src.dashboard import data_trust as data_trust_report
+from src.dashboard import vol_surface
 from src.dashboard.data_loader import SnapshotBundle
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
@@ -733,6 +734,21 @@ def _strike_profile_snapshot(symbol: str, expiration: str | None) -> dict:
         "available_expirations": available_expirations,
         "underlying_price": _underlying_price(bundle.chain),
         "strikes": strikes,
+    }
+
+
+@router.get("/surface")
+def surface(symbol: str = Query(...)) -> dict:
+    """IV by (dte, moneyness) for one symbol -- the raw surface the term
+    structure and skew summaries are computed from."""
+    symbol = symbol.upper()
+    if symbol not in SYMBOL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
+    bundle = _load_bundle(symbol)
+    return {
+        "symbol": symbol,
+        "as_of": bundle.as_of.isoformat(),
+        **vol_surface.build_surface(bundle.chain, _underlying_price(bundle.chain), _live_dte),
     }
 
 
