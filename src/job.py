@@ -25,7 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime, UTC
+from datetime import date as _date, datetime, UTC
 from pathlib import Path
 from typing import Optional
 
@@ -106,7 +106,7 @@ class OptionsVolJob:
     # Primary entry point
     # ------------------------------------------------------------------
 
-    def run(self) -> dict[str, pd.DataFrame]:
+    def run(self, snapshot_date: _date | None = None) -> dict[str, pd.DataFrame]:
         """
         Execute the full daily pipeline:
           authenticate → fetch chain → save raw →
@@ -193,7 +193,17 @@ class OptionsVolJob:
         # table) -- see src/schwab_database.py. Only reached once the chain
         # has passed the usability check above, so this table never
         # accumulates garbage -999 rows either.
-        snapshot_date = datetime.now(UTC).date()
+        # Dated by the CALLER's run date when given, not by the clock at the
+        # moment this particular symbol finished fetching. A 24-symbol run
+        # takes ~8.5 minutes, and GitHub routinely delays scheduled workflows
+        # (the 2026-09-14 run fired at 23:55 UTC instead of 21:30), so a run
+        # can straddle midnight. Computing the date per symbol split that run
+        # clean in half: SPX through SNDK landed on 09-14, COHR through APLD
+        # on 09-15, and neither date held a complete 24-symbol chain --
+        # while history/vol_history.db, whose caller already passed one
+        # run-wide date, correctly recorded all 24 under 09-14. The two
+        # databases disagreed about the same run.
+        snapshot_date = snapshot_date or datetime.now(UTC).date()
         self._db.append_options_snapshot(self.save_symbol, snapshot_date, chain)
 
         # 3c. Price history for VRP (realized vol vs. implied) -- see run()'s

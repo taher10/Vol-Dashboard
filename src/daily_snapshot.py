@@ -94,7 +94,10 @@ def _fetch_symbol(symbol: str, info, store: HistoryStore, snapshot_date) -> str:
                 strike_increment=info.strike_increment,
                 strikes_each_side=info.strikes_each_side,
             )
-            metrics = job.run()
+            # Same date for the raw chain as for metric_history, so both
+            # databases describe one run rather than whenever each symbol
+            # happened to finish.
+            metrics = job.run(snapshot_date)
             n_rows = store.append_snapshot(symbol, snapshot_date, metrics)
             logger.info("%s: appended %d expiration rows to history", symbol, n_rows)
             return "ok"

@@ -251,6 +251,31 @@ class SchwabDatabase:
                 params=params,
             )
 
+    def snapshot_symbol_counts(self, limit: int = 8) -> list[tuple[date, int]]:
+        """How many distinct symbols the raw chain holds per snapshot date,
+        most recent first.
+
+        Exists so src/validate_collection.py can cross-check this table
+        against history/vol_history.db. The two are written by the same run
+        and should agree; on 2026-09-14 they didn't, because this table's
+        date was computed per symbol while the other's was passed in once for
+        the whole run, and the run straddled midnight UTC. Everything that
+        only read metric_history saw a healthy 24-symbol day and reported
+        success.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT snapshot_date, COUNT(DISTINCT symbol)
+                FROM options
+                GROUP BY snapshot_date
+                ORDER BY snapshot_date DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [(date.fromisoformat(r[0]), r[1]) for r in rows]
+
     def options_snapshot_dates(self, symbol: str) -> list[date]:
         """Every date we have a full stored options-chain snapshot for this symbol, ascending."""
         with self._connect() as conn:
