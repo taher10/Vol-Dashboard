@@ -20,7 +20,7 @@ from datetime import date, timedelta
 import pytest
 
 from src.history_store import HistoryStore
-from src.validate_collection import _depth_problems, validate
+from src.validate_collection import _chain_consistency_problems, _depth_problems, validate
 
 MON = date(2026, 9, 7)
 FRI = date(2026, 9, 11)
@@ -161,3 +161,54 @@ class TestRealStoreContract:
     def test_snapshot_dates_is_empty_for_unknown_symbol(self, tmp_path):
         store = HistoryStore(db_path=tmp_path / "h.db")
         assert store.snapshot_dates("NOPE") == []
+
+
+class TestChainConsistency:
+    """The raw chain table and metric_history are written by the same run and
+    should agree. When they don't, everything reading only metric_history --
+    which was every check, until this one -- reports a healthy day."""
+
+    class FakeChainDb:
+        def __init__(self, counts):
+            self._counts = counts
+
+        def snapshot_symbol_counts(self, limit=8):
+            return sorted(self._counts.items(), reverse=True)[:limit]
+
+    def test_agreement_reports_nothing(self):
+        db = self.FakeChainDb({FRI: 24})
+        assert _chain_consistency_problems(24, FRI, db) == []
+
+    def test_midnight_split_is_caught_and_named(self):
+        """The real 2026-09-14 failure: a delayed run crossed midnight UTC and
+        left 12 symbols on each side."""
+        db = self.FakeChainDb({FRI: 12, FRI + timedelta(days=1): 12})
+        problems = _chain_consistency_problems(24, FRI, db)
+        assert len(problems) == 1
+        assert "straddled midnight" in problems[0]
+        assert "12 of 24" in problems[0]
+
+    def test_plain_shortfall_is_reported_differently(self):
+        """Missing symbols with nothing on the next day isn't a midnight split
+        and shouldn't be explained as one."""
+        db = self.FakeChainDb({FRI: 9})
+        problems = _chain_consistency_problems(24, FRI, db)
+        assert len(problems) == 1
+        assert "straddled midnight" not in problems[0]
+        assert "disagree" in problems[0]
+
+    def test_missing_or_unreadable_chain_db_does_not_fail_the_run(self):
+        """Coverage checking must survive a chain DB that isn't there -- it's
+        LFS-tracked and large, and a missing one is not a data-collection
+        failure."""
+        class Exploding:
+            def snapshot_symbol_counts(self, limit=8):
+                raise RuntimeError("database is locked")
+
+        assert _chain_consistency_problems(24, FRI, Exploding()) == []
+        assert _chain_consistency_problems(24, FRI, None) == []
+        assert _chain_consistency_problems(24, FRI, self.FakeChainDb({})) == []
+
+    def test_no_metric_date_means_nothing_to_compare(self):
+        db = self.FakeChainDb({FRI: 12})
+        assert _chain_consistency_problems(24, None, db) == []
