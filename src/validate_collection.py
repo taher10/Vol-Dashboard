@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from datetime import date, timedelta
 
@@ -131,6 +132,29 @@ def _depth_problems(symbol: str, stats: list[dict], thin_fraction: float) -> lis
         )
 
     return problems
+
+
+def open_chain_db() -> tuple["SchwabDatabase | None", str | None]:
+    """Open the raw chain database, or explain why it couldn't be.
+
+    database/schwab_database.db is 172MB and Git LFS-tracked. A checkout
+    without `lfs: true` leaves a ~130-byte pointer file at that path, and
+    opening it raises `sqlite3.DatabaseError: file is not a database` -- which
+    is exactly how the 2026-09-15 validation run died once this cross-check
+    was added to a workflow that deliberately skips LFS.
+
+    Pulling LFS on a daily job isn't the answer either: 172MB a day against
+    the 1GB/month free bandwidth tier exhausts the quota in under a week. So
+    the cross-check runs where the file already exists (the snapshot job,
+    which must fetch LFS to write it) and reports itself skipped elsewhere.
+    Returns (db, None) on success, (None, reason) otherwise.
+    """
+    try:
+        return SchwabDatabase(), None
+    except sqlite3.DatabaseError as exc:
+        return None, f"raw chain database is not readable ({exc}) -- likely an LFS pointer from a no-LFS checkout"
+    except Exception as exc:  # noqa: BLE001 -- never let an optional input fail the coverage check
+        return None, f"raw chain database unavailable ({type(exc).__name__}: {exc})"
 
 
 def _chain_consistency_problems(
@@ -282,11 +306,16 @@ def main() -> int:
         "expiration count (default: 0.5, i.e. a halving).",
     )
     args = parser.parse_args()
+    chain_db, skip_reason = open_chain_db()
+    if skip_reason:
+        # Announced, not swallowed. A check that quietly stops running is
+        # worse than one that was never added -- it reports success forever.
+        _annotate("warning", f"Raw-chain cross-check SKIPPED: {skip_reason}")
     return validate(
         max_stale_days=args.max_stale_days,
         window_trading_days=args.window,
         thin_fraction=args.thin_fraction,
-        chain_db=SchwabDatabase(),
+        chain_db=chain_db,
     )
 
 
