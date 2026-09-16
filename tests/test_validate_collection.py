@@ -20,7 +20,8 @@ from datetime import date, timedelta
 import pytest
 
 from src.history_store import HistoryStore
-from src.validate_collection import _chain_consistency_problems, _depth_problems, validate
+from src.schwab_database import SchwabDatabase
+from src.validate_collection import _chain_consistency_problems, _depth_problems, open_chain_db, validate
 
 MON = date(2026, 9, 7)
 FRI = date(2026, 9, 11)
@@ -212,3 +213,38 @@ class TestChainConsistency:
     def test_no_metric_date_means_nothing_to_compare(self):
         db = self.FakeChainDb({FRI: 12})
         assert _chain_consistency_problems(24, None, db) == []
+
+
+class TestChainDbOpening:
+    """database/schwab_database.db is 172MB and LFS-tracked. A checkout
+    without `lfs: true` leaves a ~130-byte pointer at that path, and opening
+    it as SQLite raises "file is not a database" -- which took down the
+    2026-09-15 validation run when the cross-check was added to a workflow
+    that deliberately skips LFS."""
+
+    def test_lfs_pointer_is_reported_not_raised(self, tmp_path, monkeypatch):
+        pointer = tmp_path / "schwab_database.db"
+        pointer.write_text(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 189038592\n"
+        )
+        monkeypatch.setattr(
+            "src.validate_collection.SchwabDatabase",
+            lambda *a, **k: SchwabDatabase(db_path=pointer),
+        )
+        db, reason = open_chain_db()
+        assert db is None
+        assert reason is not None and "not readable" in reason
+
+    def test_a_real_database_opens_cleanly(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "src.validate_collection.SchwabDatabase",
+            lambda *a, **k: SchwabDatabase(db_path=tmp_path / "fresh.db"),
+        )
+        db, reason = open_chain_db()
+        assert reason is None and db is not None
+
+    def test_coverage_still_validates_without_a_chain_db(self):
+        """Losing the optional cross-check must not take the real checks with
+        it -- coverage is the part that catches a dead pipeline."""
+        store = FakeStore({"AAA": [MON, FRI], "BBB": [MON, FRI]})
+        assert validate(today=FRI, store=store, symbols=symbols("AAA", "BBB"), chain_db=None) == 0

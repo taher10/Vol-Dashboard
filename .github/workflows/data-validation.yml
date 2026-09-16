@@ -32,10 +32,16 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      # No lfs: true -- this only reads history/vol_history.db, which is a
-      # normal git object. database/schwab_database.db is LFS-tracked and
-      # isn't needed here, so skipping LFS keeps this job fast and removes a
-      # dependency on the LFS quota being intact.
+      # No lfs: true, deliberately. This job reads history/vol_history.db,
+      # a normal git object. database/schwab_database.db is LFS-tracked and
+      # 172MB; fetching it daily would burn the 1GB/month free bandwidth tier
+      # in under a week. The validator's raw-chain cross-check therefore
+      # reports itself SKIPPED here and runs in daily-snapshot.yml instead,
+      # which already fetches LFS to write that file.
+      #
+      # Adding that cross-check without this comment being updated is what
+      # broke run #2 on 2026-09-15: the validator opened the LFS pointer as
+      # SQLite and died with "file is not a database".
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
