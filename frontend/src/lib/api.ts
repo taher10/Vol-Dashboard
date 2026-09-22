@@ -319,6 +319,21 @@ export interface SurfaceCell {
    * spurious step at the money. */
   side: "CALL" | "PUT";
   contracts: number;
+  /** Only present in the comparison view. */
+  iv_prev?: number;
+  change?: number;
+}
+
+export interface SurfaceComparison {
+  compare_date: string;
+  /** Real elapsed days, not an assumed week -- pipeline outages mean the
+   * nearest stored snapshot is often much further back than intended. */
+  days_elapsed: number;
+  prior_spot: number | null;
+  spot_change_pct: number | null;
+  cells: SurfaceCell[];
+  change_min: number | null;
+  change_max: number | null;
 }
 
 export interface SurfaceResponse {
@@ -330,6 +345,8 @@ export interface SurfaceResponse {
   cells: SurfaceCell[];
   iv_min: number | null;
   iv_max: number | null;
+  available_compare_dates: string[];
+  comparison: SurfaceComparison | null;
 }
 
 export interface CalendarEdgeRow {
@@ -612,7 +629,8 @@ export const api = {
   termStructure: (nearDte = 7, farDte = 60) =>
     apiGet<TermStructureResponse>("/api/scanner/term-structure", { near_dte: nearDte, far_dte: farDte }),
 
-  surface: (symbol: string) => apiGet<SurfaceResponse>("/api/surface", { symbol }),
+  surface: (symbol: string, compare?: string) =>
+    apiGet<SurfaceResponse>("/api/surface", { symbol, compare }),
 
   scannerStrikeProfile: (symbol: string, expiration?: string) =>
     apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),

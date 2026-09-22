@@ -137,3 +137,104 @@ def build_surface(chain: pd.DataFrame | None, spot: float | None, live_dte) -> d
         "iv_min": min(ivs),
         "iv_max": max(ivs),
     }
+
+
+# Standard maturity ladder for comparing two dates. See build_comparison.
+DTE_BUCKETS = [7, 14, 30, 45, 60, 90, 120, 180, 270, 365]
+
+_STORED_COLUMN_MAP = {
+    "implied_volatility": "impliedVolatility",
+    "strike_price": "strikePrice",
+    "option_type": "optionType",
+    "underlying_price": "underlyingPrice",
+}
+
+
+def normalize_stored_chain(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename SchwabDatabase.options_snapshot()'s snake_case columns to the
+    camelCase the live chain uses, so one surface implementation serves both."""
+    return df.rename(columns=_STORED_COLUMN_MAP)
+
+
+def _nearest_bucket(dte: int) -> int:
+    return min(DTE_BUCKETS, key=lambda b: abs(b - dte))
+
+
+def build_comparison(
+    current_chain: pd.DataFrame | None,
+    prior_chain: pd.DataFrame | None,
+    current_spot: float | None,
+    prior_spot: float | None,
+    live_dte,
+) -> dict:
+    """
+    How the surface repriced between two snapshots.
+
+    Two choices that decide whether the numbers mean anything:
+
+    **Constant maturity, not same expiration.** A contract that was 32 DTE on
+    the earlier snapshot is fewer DTE now, so diffing the same expiration
+    blends the vol move with plain roll-down and reads as a change that
+    didn't happen. Both sides are snapped to a standard maturity ladder
+    instead, which answers "what is 30-day vol doing" rather than "what
+    happened to that one contract".
+
+    **Each side's dte measured as of its own snapshot.** The current chain
+    uses live_dte (today's real date, see _live_dte's own warning about the
+    frozen column), but the prior chain deliberately uses its stored `dte`
+    column: that value was correct on the day it was fetched, which is
+    exactly the maturity that snapshot was quoting. Recomputing it against
+    today would shift every historical expiry and silently misalign the grid.
+
+    Moneyness handles the other half: it's relative to each snapshot's own
+    spot, so a 10%-OTM put is compared against what was then a 10%-OTM put
+    even though spot moved in between.
+
+    Cells appear only where both sides quoted something. A strike listed
+    today but not a fortnight ago has no change to report, and inventing a
+    baseline for it would manufacture a move.
+    """
+    now = build_surface(current_chain, current_spot, live_dte)
+    if not now["cells"] or prior_chain is None or prior_chain.empty or not prior_spot:
+        return {"cells": [], "change_min": None, "change_max": None}
+
+    # build_surface needs a per-expiration dte. For a stored chain the row's own
+    # dte column is the honest one -- it was correct on the day it was fetched.
+    dte_by_exp = (
+        prior_chain.assign(_e=prior_chain["expiration"].apply(lambda e: pd.Timestamp(e).date().isoformat()))
+        .groupby("_e")["dte"]
+        .median()
+        .to_dict()
+    )
+    prior = build_surface(prior_chain, prior_spot, lambda e: int(dte_by_exp.get(e, -1)))
+    if not prior["cells"]:
+        return {"cells": [], "change_min": None, "change_max": None}
+
+    def bucketed(cells):
+        out: dict[tuple[int, float], list[float]] = {}
+        for c in cells:
+            out.setdefault((_nearest_bucket(c["dte"]), c["moneyness"]), []).append(c["iv"])
+        return {k: sum(v) / len(v) for k, v in out.items()}
+
+    a, b = bucketed(now["cells"]), bucketed(prior["cells"])
+    cells = [
+        {
+            "dte": k[0],
+            "moneyness": k[1],
+            "iv": round(a[k], 4),
+            "iv_prev": round(b[k], 4),
+            "change": round(a[k] - b[k], 4),
+        }
+        for k in sorted(a.keys() & b.keys())
+    ]
+    if not cells:
+        return {"cells": [], "change_min": None, "change_max": None}
+
+    changes = [c["change"] for c in cells]
+    return {
+        "cells": cells,
+        "change_min": min(changes),
+        "change_max": max(changes),
+        "buckets": sorted({c["dte"] for c in cells}),
+        "moneyness": sorted({c["moneyness"] for c in cells}),
+    }
