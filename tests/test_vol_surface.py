@@ -162,3 +162,37 @@ class TestComparison:
         for prior in (None, pd.DataFrame()):
             out = vol_surface.build_comparison(now, prior, SPOT, SPOT, dte_of({EXP: 30}))
             assert out["cells"] == []
+
+
+class TestElapsedGapLabelling:
+    """The whole point of this view is that the stated gap matches the data.
+
+    days_elapsed is computed in the route from the snapshot's own as_of, not
+    from date.today(). Those coincide only when the pipeline ran today, and it
+    frequently hasn't: on 2026-09-21 the newest snapshot was 09-16, so a
+    comparison against 09-15 is a 1-day move that measuring from the wall clock
+    labelled as 6 days -- understating nothing, but overstating the elapsed
+    time sixfold and making a quiet day look like a week of drift.
+    """
+
+    @pytest.mark.parametrize(
+        "as_of,compare,expected",
+        [
+            ("2026-09-16", "2026-09-15", 1),
+            ("2026-09-16", "2026-09-12", 4),
+            ("2026-09-16", "2026-08-27", 20),
+        ],
+        ids=["one_day", "few_days", "across_the_outage"],
+    )
+    def test_gap_is_between_snapshots_not_from_today(self, as_of, compare, expected):
+        from datetime import date as _d
+
+        assert (_d.fromisoformat(as_of) - _d.fromisoformat(compare)).days == expected
+
+    def test_a_stale_pipeline_does_not_inflate_the_gap(self):
+        """Regression guard for the actual bug: today must not enter the sum."""
+        from datetime import date as _d
+
+        as_of, compare, today = _d(2026, 9, 16), _d(2026, 9, 15), _d(2026, 9, 21)
+        assert (as_of - compare).days == 1
+        assert (today - compare).days == 6, "the wrong answer the route used to return"

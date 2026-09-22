@@ -782,7 +782,14 @@ def surface(symbol: str = Query(...), compare: str | None = Query(None)) -> dict
             # The real elapsed gap, not an assumed week. The pipeline's
             # outages mean the nearest available snapshot is often much
             # further back than the user intends to ask for.
-            "days_elapsed": (today - compare_date).days,
+            # Measured between the two SNAPSHOTS, not from today. The current
+            # surface comes from the latest stored snapshot, which is often
+            # older than now -- on 2026-09-21 the newest was 09-16, so a
+            # comparison against 09-15 is a 1-day move that measuring from
+            # today would have labelled 6 days. That is the same class of
+            # mislabelling this view exists to avoid: the gap has to describe
+            # the data being differenced, not the wall clock.
+            "days_elapsed": (bundle.as_of.date() - compare_date).days,
             "prior_spot": prior_spot,
             "spot_change_pct": ((spot - prior_spot) / prior_spot * 100) if spot and prior_spot else None,
             **result,
