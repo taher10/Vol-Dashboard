@@ -150,6 +150,49 @@ Pay attention to packages present in CI and *absent* locally, not just version b
 
 ---
 
+## Anything opening `database/schwab_database.db` breaks in CI
+
+**Recurred: 2 times (2026-09-15 data-validation, 2026-09-22 tests).**
+
+**What it looks like:** a workflow that passes locally dies in CI with
+
+```
+sqlite3.DatabaseError: file is not a database
+```
+
+**Why it happens:** that file is ~172MB and Git LFS-tracked. Only
+`daily-snapshot.yml` checks out with `lfs: true`, because it has to in order
+to write the file. Every other workflow deliberately does not: 172MB per run
+against the 1GB/month free bandwidth tier is under a week of runway, and
+exhausting LFS would take the snapshot job's commit step down with it. A
+checkout without LFS leaves a ~130-byte pointer at that path, and opening it
+as SQLite raises the error above.
+
+It has now caught the same person twice in a week -- first by adding the
+raw-chain cross-check to `data-validation.yml`, then by writing a unit test
+that constructed `SchwabDatabase()` on the default path.
+
+**The rule:** before any code path opens that database, ask which workflow
+runs it. If the answer is anything other than `daily-snapshot.yml`, it will
+see a pointer file.
+
+- **Production code** should degrade, not crash -- see
+  `validate_collection.open_chain_db()`, which returns `(db, reason)` and
+  announces the skip loudly rather than swallowing it.
+- **Tests** should never touch it at all. Monkeypatch
+  `src.schwab_database._DEFAULT_DB_PATH` to a `tmp_path`, or pass an explicit
+  `db_path`. A unit test has no business opening a 172MB tracked file even
+  when the file is real.
+- **Reproduce the CI condition in one line** rather than guessing:
+  ```bash
+  cp database/schwab_database.db /tmp/real.db
+  printf 'version https://git-lfs.github.com/spec/v1\noid sha256:x\nsize 1\n' > database/schwab_database.db
+  pytest            # or whatever the workflow runs
+  cp /tmp/real.db database/schwab_database.db
+  ```
+
+---
+
 ## Template for new entries
 
 ```markdown
