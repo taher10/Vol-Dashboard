@@ -39,11 +39,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 from src.dashboard import data_trust
 from src.history_store import HistoryStore
+from src.schwab_database import SchwabDatabase
 from src.symbols import SYMBOL_REGISTRY
 
 
@@ -132,6 +134,69 @@ def _depth_problems(symbol: str, stats: list[dict], thin_fraction: float) -> lis
     return problems
 
 
+def open_chain_db() -> tuple["SchwabDatabase | None", str | None]:
+    """Open the raw chain database, or explain why it couldn't be.
+
+    database/schwab_database.db is 172MB and Git LFS-tracked. A checkout
+    without `lfs: true` leaves a ~130-byte pointer file at that path, and
+    opening it raises `sqlite3.DatabaseError: file is not a database` -- which
+    is exactly how the 2026-09-15 validation run died once this cross-check
+    was added to a workflow that deliberately skips LFS.
+
+    Pulling LFS on a daily job isn't the answer either: 172MB a day against
+    the 1GB/month free bandwidth tier exhausts the quota in under a week. So
+    the cross-check runs where the file already exists (the snapshot job,
+    which must fetch LFS to write it) and reports itself skipped elsewhere.
+    Returns (db, None) on success, (None, reason) otherwise.
+    """
+    try:
+        return SchwabDatabase(), None
+    except sqlite3.DatabaseError as exc:
+        return None, f"raw chain database is not readable ({exc}) -- likely an LFS pointer from a no-LFS checkout"
+    except Exception as exc:  # noqa: BLE001 -- never let an optional input fail the coverage check
+        return None, f"raw chain database unavailable ({type(exc).__name__}: {exc})"
+
+
+def _chain_consistency_problems(
+    expected_symbols: int, latest_metric_date: date | None, chain_db: SchwabDatabase | None
+) -> list[str]:
+    """Does the raw chain table agree with metric_history about the last run?
+
+    Both are written by the same daily job, so they should record the same
+    symbols on the same date. When they disagree the data is subtly wrong in
+    a way nothing else notices: on 2026-09-14 the run started at 23:55 UTC
+    (GitHub delayed the 21:30 cron) and crossed midnight, so the raw chain
+    split 12 symbols onto 09-14 and 12 onto 09-15 while metric_history put
+    all 24 on 09-14. Every check that read only metric_history -- including
+    this one, at the time -- reported a healthy day.
+    """
+    if chain_db is None or latest_metric_date is None:
+        return []
+    try:
+        counts = dict(chain_db.snapshot_symbol_counts(limit=8))
+    except Exception:  # noqa: BLE001 -- a missing/locked chain DB must not fail the coverage check
+        return []
+    if not counts:
+        return []
+
+    on_date = counts.get(latest_metric_date, 0)
+    if on_date >= expected_symbols:
+        return []
+
+    # A run that straddled midnight leaves the remainder on the next day.
+    spill = counts.get(latest_metric_date + timedelta(days=1), 0)
+    if on_date and spill and on_date + spill >= expected_symbols:
+        return [
+            f"Raw chain for {latest_metric_date} holds {on_date} of {expected_symbols} symbols, with {spill} more "
+            f"on {latest_metric_date + timedelta(days=1)}: the run straddled midnight UTC and split across two "
+            "dates. metric_history recorded the run correctly, so only the raw chain is affected."
+        ]
+    return [
+        f"Raw chain for {latest_metric_date} holds {on_date} of {expected_symbols} symbols that metric_history "
+        "recorded for the same date -- the two databases disagree about the same run."
+    ]
+
+
 def validate(
     max_stale_days: int = 3,
     window_trading_days: int = 45,
@@ -139,6 +204,7 @@ def validate(
     thin_fraction: float = 0.5,
     store: HistoryStore | None = None,
     symbols: dict | None = None,
+    chain_db: SchwabDatabase | None = None,
 ) -> int:
     """Returns a process exit code: 0 healthy, 1 problems found.
 
@@ -146,6 +212,12 @@ def validate(
     SYMBOL_REGISTRY; they're injectable so tests can drive this against a
     temporary database and a known symbol set instead of whatever today's
     production data happens to look like.
+
+    `chain_db` is passed in rather than constructed here, and the raw-chain
+    cross-check is simply skipped when it's absent. Building it implicitly
+    would tie every coverage test to whatever the real chain database holds,
+    which is exactly the coupling that made the first version of this check
+    fail unrelated tests. main() wires the real one in.
     """
     today = today or date.today()
     store = store or HistoryStore()
@@ -196,6 +268,10 @@ def validate(
     for symbol in sorted(current):
         problems.extend(_depth_problems(symbol, store.collection_stats(symbol), thin_fraction))
 
+    # Cross-check the raw chain table against metric_history for the same run.
+    latest_date = date.fromisoformat(latest) if latest else None
+    problems.extend(_chain_consistency_problems(report["symbol_count"], latest_date, chain_db))
+
     if problems:
         for p in problems:
             _annotate("error", p)
@@ -230,10 +306,16 @@ def main() -> int:
         "expiration count (default: 0.5, i.e. a halving).",
     )
     args = parser.parse_args()
+    chain_db, skip_reason = open_chain_db()
+    if skip_reason:
+        # Announced, not swallowed. A check that quietly stops running is
+        # worse than one that was never added -- it reports success forever.
+        _annotate("warning", f"Raw-chain cross-check SKIPPED: {skip_reason}")
     return validate(
         max_stale_days=args.max_stale_days,
         window_trading_days=args.window,
         thin_fraction=args.thin_fraction,
+        chain_db=chain_db,
     )
 
 

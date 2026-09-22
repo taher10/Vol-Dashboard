@@ -104,6 +104,15 @@ jobs:
           git diff --staged --quiet || git commit -m "Daily vol snapshot $(date -u +%F)"
           git push
 
+      # Runs HERE rather than in data-validation.yml because this job already
+      # fetches LFS (it has to, to write the chain DB) and so has the real
+      # 172MB file on disk. Pulling that into the daily validation job instead
+      # would cost 172MB/day against a 1GB/month free LFS tier -- under a
+      # week's runway. Placed after the commit deliberately: a validation
+      # failure should flag the problem, never discard the day's data.
+      - name: Validate what was collected
+        run: python -m src.validate_collection --max-stale-days 3
+
       # Fallback alert for failures src/daily_snapshot.py's own notify() call
       # never got a chance to send -- e.g. "Restore token.json from secret"
       # or "Install dependencies" failing before the Python pipeline even runs.
