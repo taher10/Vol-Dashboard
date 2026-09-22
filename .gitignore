@@ -30,8 +30,19 @@ env/
 .venv*/
 
 # IDE
-.vscode/settings.json
+.vscode/
 .idea/
 
 # macOS
 .DS_Store
+
+# Local-only databases. database/schwab_database.db itself is TRACKED (the
+# daily workflow commits it), so listing it here would do nothing -- .gitignore
+# only applies to untracked files. Instead, point a local dev session at one of
+# these paths via SCHWAB_DB_PATH so live refreshes never dirty the committed
+# file and block the next pull:
+#
+#   export SCHWAB_DB_PATH=database/local.db
+#
+database/local*.db
+database/*.local.db
