@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { VolSurfaceHeatmap } from "@/components/charts/vol-surface-heatmap";
 import { api, ApiError, type SurfaceResponse } from "@/lib/api";
 import { fmtDateTime, fmtNum } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { COLOR_GRID, COLOR_TEXT_MUTED } from "@/lib/theme";
 import { primarySymbol, useSettingsStore } from "@/lib/store";
 
@@ -21,6 +22,7 @@ export default function SurfacePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDte, setSelectedDte] = useState<number | null>(null);
+  const [compareDate, setCompareDate] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -28,7 +30,7 @@ export default function SurfacePage() {
     setLoading(true);
     setError(null);
     api
-      .surface(symbol)
+      .surface(symbol, compareDate ?? undefined)
       .then((res) => {
         if (cancelled) return;
         setData(res);
@@ -45,6 +47,10 @@ export default function SurfacePage() {
     return () => {
       cancelled = true;
     };
+  }, [symbol, compareDate]);
+
+  useEffect(() => {
+    setCompareDate(null);
   }, [symbol]);
 
   const smile = useMemo(() => {
@@ -65,6 +71,27 @@ export default function SurfacePage() {
     if (!put || !call) return null;
     return { put: put.iv, call: call.iv, diff: put.iv - call.iv };
   }, [smile]);
+
+  const comparison = data?.comparison ?? null;
+  const changeAbsMax = useMemo(() => {
+    if (!comparison) return 0;
+    return Math.max(Math.abs(comparison.change_min ?? 0), Math.abs(comparison.change_max ?? 0));
+  }, [comparison]);
+
+  // In change mode the grid is the constant-maturity buckets the comparison
+  // was computed on, not the raw expirations -- those are what can be
+  // compared like-for-like across two dates.
+  const heatmapExpirations = useMemo(() => {
+    if (!comparison) return data?.expirations ?? [];
+    return [...new Set(comparison.cells.map((c) => c.dte))]
+      .sort((a, b) => a - b)
+      .map((dte) => ({ dte, expiration: `${dte}d constant maturity` }));
+  }, [comparison, data]);
+
+  const heatmapMoneyness = useMemo(() => {
+    if (!comparison) return data?.moneyness ?? [];
+    return [...new Set(comparison.cells.map((c) => c.moneyness))].sort((a, b) => a - b);
+  }, [comparison, data]);
 
   const selectedExpiration = data?.expirations.find((e) => e.dte === selectedDte);
 
@@ -121,19 +148,86 @@ export default function SurfacePage() {
               <span>Snapshot {fmtDateTime(data.as_of)}</span>
             </div>
 
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div className="inline-flex overflow-hidden rounded-md border border-border">
+                <button
+                  type="button"
+                  onClick={() => setCompareDate(null)}
+                  className={cn(
+                    "px-2.5 py-1 text-xs transition-colors",
+                    !compareDate ? "bg-foreground text-background" : "bg-card hover:bg-accent"
+                  )}
+                >
+                  Levels
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCompareDate(data.available_compare_dates[0] ?? null)}
+                  disabled={data.available_compare_dates.length === 0}
+                  className={cn(
+                    "px-2.5 py-1 text-xs transition-colors disabled:opacity-40",
+                    compareDate ? "bg-foreground text-background" : "bg-card hover:bg-accent"
+                  )}
+                >
+                  Change vs…
+                </button>
+              </div>
+
+              {compareDate && (
+                <>
+                  <select
+                    value={compareDate}
+                    onChange={(e) => setCompareDate(e.target.value)}
+                    className="rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
+                  >
+                    {data.available_compare_dates.map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                  {comparison && (
+                    <span className="text-[11px] text-muted-foreground">
+                      {/* The real gap, stated plainly. The pipeline's outages mean
+                          the nearest stored snapshot is often far older than "a
+                          week ago", and calling an 18-day move a weekly one would
+                          understate it by more than double. */}
+                      <span className="text-foreground">
+                        {comparison.days_elapsed} {comparison.days_elapsed === 1 ? "day" : "days"}
+                      </span>{" "}
+                      elapsed
+                      {comparison.spot_change_pct !== null && (
+                        <>
+                          {" · spot "}
+                          <span className={comparison.spot_change_pct >= 0 ? "text-pos" : "text-neg"}>
+                            {comparison.spot_change_pct >= 0 ? "+" : ""}
+                            {fmtNum(comparison.spot_change_pct, 1)}%
+                          </span>
+                        </>
+                      )}
+                      {" · "}
+                      {comparison.cells.length} comparable cells
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+
             <ChartCard
               title="Implied Volatility Surface"
               hint="Moneyness across, expiry down, colour is implied vol. Rendered flat rather than as a rotatable 3D plot on purpose: in 3D the wing you care about is usually hidden behind the one you don't, and comparing two points means judging height by eye."
               className="mb-4"
             >
               <VolSurfaceHeatmap
-                cells={data.cells}
-                expirations={data.expirations}
-                moneyness={data.moneyness}
+                cells={comparison ? comparison.cells : data.cells}
+                expirations={heatmapExpirations}
+                moneyness={heatmapMoneyness}
                 ivMin={data.iv_min ?? 0}
                 ivMax={data.iv_max ?? 1}
-                selectedDte={selectedDte}
+                selectedDte={comparison ? null : selectedDte}
                 onSelectDte={setSelectedDte}
+                mode={comparison ? "change" : "level"}
+                changeAbsMax={changeAbsMax}
               />
             </ChartCard>
 

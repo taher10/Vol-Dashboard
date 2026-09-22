@@ -45,6 +45,19 @@ function ivColor(iv: number, min: number, max: number): string {
   return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
 }
 
+/** Diverging ramp centred on zero, for the change view. Symmetric around
+ * the larger absolute extreme so +2 and -2 are equally saturated -- scaling
+ * each side to its own max would make a small drop look like a big one. */
+function changeColor(change: number, absMax: number): string {
+  if (absMax <= 0) return "rgb(40,46,56)";
+  const t = Math.max(-1, Math.min(1, change / absMax));
+  if (Math.abs(t) < 0.04) return "rgb(38,44,53)";
+  // Vol richer = warm, vol cheaper = cool.
+  const [r, g, b] = t > 0 ? [214, 71, 84] : [58, 132, 184];
+  const a = 0.15 + Math.abs(t) * 0.75;
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
 export function VolSurfaceHeatmap({
   cells,
   expirations,
@@ -53,6 +66,8 @@ export function VolSurfaceHeatmap({
   ivMax,
   selectedDte,
   onSelectDte,
+  mode = "level",
+  changeAbsMax = 0,
 }: {
   cells: SurfaceCell[];
   expirations: { dte: number; expiration: string }[];
@@ -61,6 +76,8 @@ export function VolSurfaceHeatmap({
   ivMax: number;
   selectedDte: number | null;
   onSelectDte: (dte: number) => void;
+  mode?: "level" | "change";
+  changeAbsMax?: number;
 }) {
   const lookup = useMemo(() => {
     const m = new Map<string, SurfaceCell>();
@@ -103,16 +120,22 @@ export function VolSurfaceHeatmap({
                   key={m}
                   onClick={() => onSelectDte(e.dte)}
                   title={
-                    cell
-                      ? `${e.expiration} (${e.dte}d) · ${(m * 100).toFixed(1)}% · IV ${cell.iv.toFixed(1)} · ${cell.side}`
-                      : `${e.expiration} (${e.dte}d) · ${(m * 100).toFixed(1)}% · not quoted`
+                    !cell
+                      ? `${e.expiration} (${e.dte}d) · ${(m * 100).toFixed(1)}% · not quoted`
+                      : mode === "change"
+                        ? `${e.dte}d · ${(m * 100).toFixed(1)}% · ${(cell.iv_prev ?? 0).toFixed(1)} → ${cell.iv.toFixed(1)} (${(cell.change ?? 0) >= 0 ? "+" : ""}${(cell.change ?? 0).toFixed(2)})`
+                        : `${e.expiration} (${e.dte}d) · ${(m * 100).toFixed(1)}% · IV ${cell.iv.toFixed(1)} · ${cell.side}`
                   }
                   className={cn(
                     "h-5 w-6 shrink-0 cursor-pointer rounded-[1px] transition-opacity",
                     selectedDte !== null && selectedDte !== e.dte && "opacity-40"
                   )}
                   style={{
-                    backgroundColor: cell ? ivColor(cell.iv, ivMin, ivMax) : "transparent",
+                    backgroundColor: cell
+                      ? mode === "change"
+                        ? changeColor(cell.change ?? 0, changeAbsMax)
+                        : ivColor(cell.iv, ivMin, ivMax)
+                      : "transparent",
                     outline: cell ? undefined : "1px dashed rgba(255,255,255,0.05)",
                     outlineOffset: "-1px",
                   }}
@@ -122,6 +145,22 @@ export function VolSurfaceHeatmap({
           </div>
         ))}
 
+        {mode === "change" ? (
+          <div className="mt-3 flex items-center gap-2 pl-12 text-[10px] text-muted-foreground">
+            <span className="font-mono">-{changeAbsMax.toFixed(1)}</span>
+            <span className="flex h-2 w-40 overflow-hidden rounded-sm">
+              {Array.from({ length: 40 }, (_, i) => (
+                <span
+                  key={i}
+                  className="flex-1"
+                  style={{ backgroundColor: changeColor((i / 19.5 - 1) * changeAbsMax, changeAbsMax) }}
+                />
+              ))}
+            </span>
+            <span className="font-mono">+{changeAbsMax.toFixed(1)}</span>
+            <span className="ml-1">IV points changed · warm = richer, cool = cheaper</span>
+          </div>
+        ) : (
         <div className="mt-3 flex items-center gap-2 pl-12 text-[10px] text-muted-foreground">
           <span className="font-mono">{ivMin.toFixed(0)}</span>
           <span className="flex h-2 w-40 overflow-hidden rounded-sm">
@@ -132,6 +171,7 @@ export function VolSurfaceHeatmap({
           <span className="font-mono">{ivMax.toFixed(0)}</span>
           <span className="ml-1">implied vol · puts left of ATM, calls right</span>
         </div>
+        )}
       </div>
     </div>
   );
