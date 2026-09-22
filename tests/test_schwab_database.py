@@ -20,9 +20,19 @@ from src.schwab_database import SchwabDatabase
 
 
 class TestDatabasePathResolution:
-    def test_defaults_to_the_committed_database(self, monkeypatch):
+    def test_defaults_to_the_committed_database(self, tmp_path, monkeypatch):
+        """The default is patched to a temp path rather than exercised for
+        real. Constructing against the actual default opens
+        database/schwab_database.db, which under CI is a Git LFS pointer (the
+        test workflow does not fetch LFS, deliberately -- 172MB per run would
+        drain the monthly quota). Opening a pointer raises "file is not a
+        database", which is how this very file broke the tests workflow on
+        2026-09-22. A unit test has no business touching a 172MB tracked
+        file anyway."""
         monkeypatch.delenv("SCHWAB_DB_PATH", raising=False)
-        assert SchwabDatabase().db_path.name == "schwab_database.db"
+        fake_default = tmp_path / "schwab_database.db"
+        monkeypatch.setattr("src.schwab_database._DEFAULT_DB_PATH", fake_default)
+        assert SchwabDatabase().db_path == fake_default
 
     def test_env_var_redirects_writes(self, tmp_path, monkeypatch):
         target = tmp_path / "local.db"
@@ -39,7 +49,8 @@ class TestDatabasePathResolution:
         """Resolved in __init__ so a shell or test that sets the variable after
         import still takes effect."""
         monkeypatch.delenv("SCHWAB_DB_PATH", raising=False)
-        assert SchwabDatabase().db_path.name == "schwab_database.db"
+        monkeypatch.setattr("src.schwab_database._DEFAULT_DB_PATH", tmp_path / "default.db")
+        assert SchwabDatabase().db_path.name == "default.db"
         monkeypatch.setenv("SCHWAB_DB_PATH", str(tmp_path / "later.db"))
         assert SchwabDatabase().db_path.name == "later.db"
 
