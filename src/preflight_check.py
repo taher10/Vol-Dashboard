@@ -81,7 +81,25 @@ def preflight(symbol: str = "AAPL", strike_count: int = 6) -> int:
             schwab.client.Client.Options.ContractType.CALL, upcoming[0], strike_count
         )
     except Exception as exc:  # noqa: BLE001
-        _annotate("error", f"Authenticated but the chain request failed for {symbol}: {type(exc).__name__}: {exc}")
+        # get_client() above only *parses* token.json -- schwab-py builds the
+        # OAuth session lazily and makes no network call, so reaching this
+        # block does not mean the credentials were ever accepted. A dead
+        # refresh token therefore surfaces here, on the first real request,
+        # and the old wording ("authenticated but the chain request failed")
+        # sent a past debugging session looking at the chain endpoint when
+        # the token was the problem. Name the actual cause instead.
+        if "invalid_grant" in str(exc):
+            _annotate(
+                "error",
+                f"Schwab rejected the refresh token on the first API call ({symbol}): invalid_grant. "
+                "The token in SCHWAB_TOKEN_B64 is well-formed but expired or revoked -- Schwab "
+                "refresh tokens last 7 days. Re-run the browser OAuth flow "
+                "(python -m src.job --first-time), confirm token.json's modified time actually "
+                "updates, then re-encode it into SCHWAB_TOKEN_B64. Re-encoding the OLD token.json "
+                "produces this exact error again.",
+            )
+            return 1
+        _annotate("error", f"Chain request failed for {symbol}: {type(exc).__name__}: {exc}")
         return 1
 
     if chain is None or chain.empty:
