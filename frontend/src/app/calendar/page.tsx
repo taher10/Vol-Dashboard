@@ -7,6 +7,7 @@ import { BarCell } from "@/components/bar-cell";
 import { ChartCard } from "@/components/chart-card";
 import { PageIntro } from "@/components/page-intro";
 import { SiteHeader } from "@/components/site-header";
+import { VarianceEdgeMath } from "@/components/variance-edge-math";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { VolBarChart, type VolBarRow } from "@/components/charts/vol-bar-chart";
@@ -258,7 +259,7 @@ export default function CalendarMathPage() {
 
   return (
     <>
-      <SiteHeader title="Calendar Math" />
+      <SiteHeader title="Calendar" />
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
         <PageIntro
           summary={
@@ -286,6 +287,10 @@ export default function CalendarMathPage() {
             than at a boundary, so there is no honest number for it without a real options-pricing model.
           </p>
         </PageIntro>
+
+        {/* Fed the top-ranked row so the derivation carries real numbers you
+            can check on a calculator, rather than symbols you have to trust. */}
+        <VarianceEdgeMath example={sorted[0] ?? null} />
 
         <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-2">
           <Control
