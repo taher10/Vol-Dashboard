@@ -24,6 +24,8 @@ from typing import Literal
 
 import pandas as pd
 
+from src.dashboard.data_loader import adapt_db_chain
+
 from src.dashboard import strategy_engine
 from src.dashboard.strategy_engine import Candidate, Leg
 
@@ -47,27 +49,11 @@ _VERTICAL_PARAMS: dict[StructureChoice, tuple[str, str]] = {
     "bear_put": ("bearish", "debit"),
 }
 
-# SchwabDatabase.options_snapshot() column -> the camelCase build_vertical()
-# (and this module's own settlement/MTM helpers) expect. dte/delta/bid/ask/
-# vega already match; not listed here.
-_COLUMN_RENAME = {
-    "option_type": "optionType",
-    "strike_price": "strikePrice",
-    "underlying_price": "underlyingPrice",
-    "implied_volatility": "impliedVolatility",  # needed by build_calendar_call()
-}
-
-
-def adapt_historical_chain(raw: pd.DataFrame) -> pd.DataFrame:
-    """Renames one day's raw SchwabDatabase.options_snapshot() output into the
-    camelCase schema strategy_engine.build_vertical() already consumes for
-    live chains, so a historical snapshot is just another chain DataFrame to
-    it -- no changes needed to strategy_engine.py itself."""
-    if raw is None or raw.empty:
-        return raw
-    df = raw.rename(columns=_COLUMN_RENAME)
-    df["expiration"] = pd.to_datetime(df["expiration"])
-    return df
+# The snake_case -> camelCase translation lives in data_loader.adapt_db_chain()
+# (the data-access layer), so a new Schwab column is mapped once rather than
+# here as well. Re-exported under this module's original name because that is
+# what routes.py's backtest endpoints call.
+adapt_historical_chain = adapt_db_chain
 
 
 def _underlying_price(chain: pd.DataFrame | None) -> float | None:

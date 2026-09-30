@@ -315,3 +315,18 @@ class SchwabDatabase:
                 conn,
                 params=(symbol, contract_symbol),
             )
+
+    def latest_options_snapshot_date(self, symbol: str) -> date | None:
+        """The most recent date with a stored chain for `symbol`, or None.
+
+        A MAX() rather than the last element of options_snapshot_dates():
+        that method's SELECT DISTINCT scans every row for the symbol and
+        cost ~66ms each on a 670k-row table, which the dashboard pays once
+        per symbol per cold leaderboard request (24 of them). This uses the
+        (symbol, snapshot_date) index and is effectively free.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(snapshot_date) FROM options WHERE symbol = ?", (symbol,)
+            ).fetchone()
+        return date.fromisoformat(row[0]) if row and row[0] else None
