@@ -153,7 +153,8 @@ def _live_dte(expiration) -> int:
     at whatever "today" was when that snapshot was pulled and goes stale (or
     even negative, i.e. already expired) the moment the pipeline falls more
     than a day behind. Used anywhere a user is picking a LIVE/current
-    expiration (PCR chart, Strike Profile, Calendar Edge leaderboard) --
+    expiration (PCR chart, Calendar leaderboard) and by the calendar's own
+    variance decomposition, which divides by the gap between the two legs --
     NOT by _expirations_list()/backtest, where dte-relative-to-the-
     historical-entry-date is exactly what's wanted, not today's date."""
     return (pd.Timestamp(expiration).date() - date.today()).days
@@ -383,7 +384,14 @@ def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta:
     if front_expiration == back_expiration:
         return None
 
-    candidate = strategy_engine.build_calendar_call(chain, front_expiration, back_expiration, target_delta)
+    # Same live-dte definition used to pick these expirations above. Without
+    # it build_calendar_call() falls back to the chain's frozen fetch-time
+    # dte column, so on a stale snapshot the variance decomposition runs on
+    # maturities several days longer than the ones this row reports -- the
+    # ranking and the DTEs shown beside it would disagree.
+    candidate = strategy_engine.build_calendar_call(
+        chain, front_expiration, back_expiration, target_delta, dte_for=_live_dte
+    )
     if candidate is None or candidate.variance_edge is None:
         return None
 

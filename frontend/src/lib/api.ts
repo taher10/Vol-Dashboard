@@ -419,26 +419,6 @@ export interface PcrResponse {
   rows: PcrRow[];
 }
 
-export interface StrikeProfileRow {
-  strike: number;
-  call_iv: number | null;
-  put_iv: number | null;
-  call_delta: number | null;
-  put_delta: number | null;
-  call_gamma: number | null;
-  put_gamma: number | null;
-  call_oi: number | null;
-  put_oi: number | null;
-}
-
-export interface StrikeProfileResponse {
-  symbol: string;
-  expiration: string | null;
-  available_expirations: ExpiryOption[];
-  underlying_price: number | null;
-  strikes: StrikeProfileRow[];
-}
-
 // ---------------------------------------------------------------------------
 // Trade Ideas (cross-symbol actionable trade feed)
 // ---------------------------------------------------------------------------
@@ -632,8 +612,6 @@ export const api = {
   surface: (symbol: string, compare?: string) =>
     apiGet<SurfaceResponse>("/api/surface", { symbol, compare }),
 
-  scannerStrikeProfile: (symbol: string, expiration?: string) =>
-    apiGet<StrikeProfileResponse>("/api/scanner/strike-profile", { symbol, expiration }),
 
   tradeIdeas: () => apiGet<TradeIdeasResponse>("/api/trade-ideas"),
 

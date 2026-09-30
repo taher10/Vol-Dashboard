@@ -24,6 +24,7 @@ consistent with what's plotted.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -462,6 +463,7 @@ def build_calendar_call(
     front_expiration: pd.Timestamp,
     back_expiration: pd.Timestamp,
     target_delta: float = 0.25,
+    dte_for: Callable[[pd.Timestamp], int] | None = None,
 ) -> Candidate | None:
     """
     Sell a front-month call near `target_delta`, buy the same-delta call on a
@@ -471,6 +473,18 @@ def build_calendar_call(
     expiration's chain slice (not pinned to the same strike), matching how a
     trader actually screens this: same delta, whatever strike that lands on
     each month.
+
+    `dte_for` decides what "days to expiry" means, and it matters more here
+    than anywhere else in this module: the variance decomposition divides by
+    (T_back - T_front) and weights each leg's variance by its own T, so a
+    wrong maturity doesn't just mislabel the trade, it changes iv_ex and
+    every dollar figure derived from it. The chain's stored `dte` column is
+    frozen at fetch time, so on a 7-day-old snapshot it overstates both legs
+    by 7 days -- which is how a screen ranked by this edge could be built on
+    maturities the caller never asked for. Pass a live-dte function for
+    screening today's chains (see routes._live_dte); leave it None in a
+    backtest, where the stored column is the honest value because it was
+    correct on the entry date being replayed.
 
     Deliberately does NOT compute max_profit/breakevens/payoff via
     _summarize()'s intrinsic-value math -- that's only correct when every
@@ -516,8 +530,12 @@ def build_calendar_call(
     if front_row is None or back_row is None:
         return None
 
-    front_dte = int(front_row["dte"])
-    back_dte = int(back_row["dte"])
+    front_dte = int(dte_for(front_expiration)) if dte_for else int(front_row["dte"])
+    back_dte = int(dte_for(back_expiration)) if dte_for else int(back_row["dte"])
+    # A live-dte lookup can put the front leg at or past expiry on a stale
+    # snapshot; the decomposition needs a real forward window to divide by.
+    if front_dte >= back_dte:
+        return None
     front_iv = float(front_row["impliedVolatility"])
     back_iv = float(back_row["impliedVolatility"])
     front_vega = float(front_row["vega"])
