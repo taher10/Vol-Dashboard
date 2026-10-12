@@ -135,3 +135,47 @@ class TestLocalBehaviourIsUnchanged:
         )
 
         assert client.post("/api/refresh?symbols=SPX").status_code != 404
+
+
+class TestDemoNeedsNoCredentialedLibraries:
+    """The demo deployment installs requirements-demo.txt, which omits
+    schwab-py and anthropic.
+
+    That is deliberate defence in depth. DEMO_MODE removes the two routes,
+    but a flag is one edit away from being wrong; a box where the SDKs are
+    not installed cannot reach Schwab or Anthropic even if the gate failed.
+    It only holds while nothing imports them at module scope, which is easy
+    to undo by accident -- `from src.job import OptionsVolJob` at the top of
+    a dashboard module would quietly restore the dependency and nobody would
+    notice until a deploy broke.
+    """
+
+    def test_api_boots_without_schwab_or_anthropic(self, monkeypatch):
+        import builtins
+        import sys
+
+        blocked = {"schwab", "anthropic", "authlib"}
+        real_import = builtins.__import__
+
+        def guarded(name, *args, **kwargs):
+            if name.split(".")[0] in blocked:
+                raise ModuleNotFoundError(f"No module named {name!r}")
+            return real_import(name, *args, **kwargs)
+
+        for mod in [m for m in sys.modules if m.split(".")[0] in blocked]:
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+        # Force a genuine re-import of the app and everything under it.
+        for mod in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+        monkeypatch.setattr(builtins, "__import__", guarded)
+        monkeypatch.setenv("DEMO_MODE", "1")
+
+        from fastapi.testclient import TestClient
+
+        from src.api.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        assert client.get("/api/health").json()["demo_mode"] is True
+        assert client.get("/api/symbols").status_code == 200
+        assert client.post("/api/refresh?symbols=SPX").status_code == 404

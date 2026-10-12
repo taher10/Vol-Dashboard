@@ -24,7 +24,6 @@ import pandas as pd
 
 from src.data_quality import is_chain_usable
 from src.data_store import CSVStore
-from src.job import OptionsVolJob
 from src.metrics import VolatilityMetrics
 from src.schwab_database import SchwabDatabase
 
@@ -240,6 +239,13 @@ def trigger_live_refresh(
     spacing means SPX's validated defaults (100 / 5) don't reach 25-delta.
     See options_fetcher.fetch_monthly_chain.
     """
+    # Imported here, not at module scope. src.job pulls in SchwabAuth and
+    # therefore schwab-py, and this is the only function in the module that
+    # needs either -- so the demo deployment can install neither. That is a
+    # stronger guarantee than DEMO_MODE on its own: the flag removes the
+    # route, while a box without the library cannot authenticate at all.
+    from src.job import OptionsVolJob
+
     job = OptionsVolJob(
         symbol=api_symbol,
         save_symbol=save_symbol,

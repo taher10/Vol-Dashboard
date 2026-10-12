@@ -1,0 +1,29 @@
+# Dependencies for the public demo deployment (DEMO_MODE=1).
+#
+# Deliberately NOT requirements.txt. The demo serves a frozen database and
+# has no credentials, so it needs neither the Schwab SDK nor the Anthropic
+# one -- and omitting them is the point, not an optimisation. DEMO_MODE
+# removes /api/refresh and /api/chat, but a flag is one bad edit from being
+# wrong; a machine where the SDKs are not installed cannot reach either
+# service even if the gate failed open.
+#
+# tests/test_demo_mode.py::TestDemoNeedsNoCredentialedLibraries boots the app
+# with both blocked, so a module-scope import that reintroduces them fails
+# CI rather than a deploy.
+#
+# Also dropped: streamlit, plotly, matplotlib (the Streamlit-era UI, which
+# the Next.js frontend replaced) and pynacl (only src/token_sync.py, which
+# writes GitHub secrets).
+
+# Web API
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Metrics -- src/metrics.py and src/dashboard/*
+pandas>=2.0.0
+numpy>=1.26.0
+scipy>=1.11.0
+
+# src/auth.py's from_env() is not used here, but src.data_store and others
+# call load_dotenv() at import.
+python-dotenv>=1.0.0
