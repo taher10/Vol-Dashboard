@@ -542,11 +542,20 @@ export interface BacktestRunParams {
   backExpiration?: string;
 }
 
+/** `demo_mode` is true on the shared deployment, where the credential-backed
+ * routes (/api/refresh, /api/chat) are removed. See src/api/demo.py. */
+export interface HealthResponse {
+  status: string;
+  demo_mode: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
 
 export const api = {
+  health: () => apiGet<HealthResponse>("/api/health"),
+
   symbols: () => apiGet<SymbolInfo[]>("/api/symbols"),
 
   overview: (symbols: string[], dteMin: number, dteMax: number) =>

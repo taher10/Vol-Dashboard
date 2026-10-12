@@ -8,10 +8,10 @@ src/history_store.py, src/symbols.py) — no scoring, metrics, or strategy
 logic is duplicated here, only HTTP plumbing (query-param parsing/validation
 and DataFrame -> JSON serialization).
 
-This app is currently run for personal/local use only (see README's "Web
-app" section), so /api/refresh triggers a live Schwab pull directly — that
-would need to come back out (or move behind auth) before this is ever
-exposed to other users, since it's a mutating, credential-backed action.
+Nothing here is authenticated, which is fine on localhost and not fine on
+a public URL: /api/refresh triggers a live, credential-backed Schwab pull.
+Setting DEMO_MODE=1 removes that route (and /api/chat) so a deployment can
+be shared safely -- see src/api/demo.py for why a flag rather than a branch.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
 from src.symbols import SYMBOL_REGISTRY
 
+from .demo import block_in_demo
 from .schemas import SymbolOut
 from .serialize import clean_value, df_records
 
@@ -1215,6 +1216,9 @@ def metric_series(
 def refresh(
     symbols: str = Query(..., description="Comma-separated symbols to refresh, e.g. 'SPX,AAPL'"),
 ) -> dict:
+    # Credential-backed and unauthenticated: a public caller could rotate
+    # the Schwab refresh token and stop the daily collection. See src/api/demo.py.
+    block_in_demo("Live refresh")
     requested = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     if not requested:
         raise HTTPException(status_code=400, detail="No symbols provided.")

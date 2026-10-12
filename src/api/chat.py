@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from src.symbols import SYMBOL_REGISTRY
 
 from . import routes
+from .demo import block_in_demo
 
 # main.py never loads .env itself (only src/auth.py's SchwabAuth.from_env()
 # does, lazily) -- this module needs ANTHROPIC_API_KEY in os.environ before
@@ -361,6 +362,8 @@ class ChatResponse(BaseModel):
 
 @router.post("/chat")
 def chat(req: ChatRequest) -> ChatResponse:
+    # Spends ANTHROPIC_API_KEY with no per-caller cap. See src/api/demo.py.
+    block_in_demo("Chat")
     if _client is None:
         raise HTTPException(503, "Chat is not configured -- set ANTHROPIC_API_KEY in .env and restart the server.")
     try:
