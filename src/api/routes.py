@@ -16,7 +16,9 @@ be shared safely -- see src/api/demo.py for why a flag rather than a branch.
 
 from __future__ import annotations
 
+import os
 from datetime import date
+from functools import lru_cache
 from typing import Literal
 
 import pandas as pd
@@ -1261,7 +1263,32 @@ def refresh(
 # (src/schwab_database.py), accumulated by job.py on every successful fetch.
 # ---------------------------------------------------------------------------
 
-_schwab_db = SchwabDatabase()
+@lru_cache(maxsize=4)
+def _db_at(_configured_path: str | None) -> SchwabDatabase:
+    """One SchwabDatabase per configured path.
+
+    Cached because SchwabDatabase.__init__ opens the file and runs the
+    schema script, which a cross-symbol endpoint would otherwise repeat 24
+    times per request. Keyed on SCHWAB_DB_PATH so changing it -- a test, or
+    a demo process pointed at a trimmed snapshot -- yields a new instance
+    rather than a stale one.
+    """
+    return SchwabDatabase()
+
+
+def _db() -> SchwabDatabase:
+    """The chain database, opened on first use rather than at import.
+
+    This was a module-level `_schwab_db = SchwabDatabase()`, which meant
+    importing this module opened database/schwab_database.db and executed
+    DDL against it. In CI that file is an unfetched Git LFS pointer (the
+    tests workflow deliberately does not fetch LFS -- 260MB per run would
+    drain the monthly quota), so `import src.api.routes` raised
+    "file is not a database" and every API test errored during collection.
+    Importing a module should not open a quarter-gigabyte file, let alone
+    require one to exist.
+    """
+    return _db_at(os.environ.get("SCHWAB_DB_PATH"))
 
 
 @router.get("/history/{symbol}/price-series")
@@ -1275,7 +1302,7 @@ def price_series(
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
     start_date = _parse_date(start, label="start date").date() if start else None
     end_date = _parse_date(end, label="end date").date() if end else None
-    df = _schwab_db.price_series(symbol, start=start_date, end=end_date)
+    df = _db().price_series(symbol, start=start_date, end=end_date)
     return {"symbol": symbol, "prices": df_records(df)}
 
 
@@ -1284,7 +1311,7 @@ def options_snapshot_dates(symbol: str) -> dict:
     symbol = symbol.upper()
     if symbol not in SYMBOL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
-    dates = _schwab_db.options_snapshot_dates(symbol)
+    dates = _db().options_snapshot_dates(symbol)
     return {"symbol": symbol, "dates": [d.isoformat() for d in dates]}
 
 
@@ -1294,7 +1321,7 @@ def options_snapshot(symbol: str, snapshot_date: str = Query(..., description="I
     if symbol not in SYMBOL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
     parsed = _parse_date(snapshot_date, label="snapshot date").date()
-    df = _schwab_db.options_snapshot(symbol, parsed)
+    df = _db().options_snapshot(symbol, parsed)
     return {"symbol": symbol, "snapshot_date": snapshot_date, "contracts": df_records(df)}
 
 
@@ -1303,7 +1330,7 @@ def contract_history(symbol: str, contract_symbol: str) -> dict:
     symbol = symbol.upper()
     if symbol not in SYMBOL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
-    df = _schwab_db.contract_history(symbol, contract_symbol)
+    df = _db().contract_history(symbol, contract_symbol)
     return {"symbol": symbol, "contract_symbol": contract_symbol, "history": df_records(df)}
 
 
@@ -1340,9 +1367,9 @@ def _history_snapshots(symbol: str, since: date) -> dict[date, pd.DataFrame]:
     `since`, adapted to the camelCase schema build_vertical() expects --
     shared by the /expirations and /run backtest endpoints below."""
     snapshots: dict[date, pd.DataFrame] = {}
-    for d in _schwab_db.options_snapshot_dates(symbol):
+    for d in _db().options_snapshot_dates(symbol):
         if d > since:
-            snapshots[d] = backtest_engine.adapt_historical_chain(_schwab_db.options_snapshot(symbol, d))
+            snapshots[d] = backtest_engine.adapt_historical_chain(_db().options_snapshot(symbol, d))
     return snapshots
 
 
@@ -1352,7 +1379,7 @@ def backtest_expirations(symbol: str, entry_date: str = Query(..., description="
     if symbol not in SYMBOL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Unknown symbol '{symbol}'.")
     parsed = _parse_date(entry_date, label="entry date").date()
-    raw = _schwab_db.options_snapshot(symbol, parsed)
+    raw = _db().options_snapshot(symbol, parsed)
     if raw.empty:
         raise HTTPException(status_code=404, detail=f"No recorded option chain for '{symbol}' on {entry_date}.")
     chain = backtest_engine.adapt_historical_chain(raw)
@@ -1378,7 +1405,7 @@ def backtest_run(
     expiration_parsed = _parse_date(expiration, label="expiration date")
     back_expiration_parsed = _parse_date(back_expiration, label="back expiration date") if back_expiration else None
 
-    raw_entry = _schwab_db.options_snapshot(symbol, entry_parsed)
+    raw_entry = _db().options_snapshot(symbol, entry_parsed)
     if raw_entry.empty:
         raise HTTPException(status_code=404, detail=f"No recorded option chain for '{symbol}' on {entry_date}.")
     entry_chain = backtest_engine.adapt_historical_chain(raw_entry)
