@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+
+import { useDemoMode } from "@/lib/use-demo-mode";
 import { MessageCircle, Send } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -17,10 +19,14 @@ import { cn } from "@/lib/utils";
  * scope, no need for cross-session storage.
  */
 export function ChatPanel() {
+  // /api/chat spends ANTHROPIC_API_KEY and is removed on the shared
+  // deployment, so the launcher is not rendered there either.
+  const demo = useDemoMode();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+
 
   async function send() {
     const text = input.trim();
@@ -39,6 +45,8 @@ export function ChatPanel() {
       setLoading(false);
     }
   }
+
+  if (demo !== false) return null;
 
   return (
     <>

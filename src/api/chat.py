@@ -19,7 +19,6 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-import anthropic
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -27,6 +26,7 @@ from pydantic import BaseModel
 from src.symbols import SYMBOL_REGISTRY
 
 from . import routes
+from .demo import block_in_demo
 
 # main.py never loads .env itself (only src/auth.py's SchwabAuth.from_env()
 # does, lazily) -- this module needs ANTHROPIC_API_KEY in os.environ before
@@ -42,11 +42,30 @@ MAX_TOOL_RESULT_CHARS = 20_000
 
 _SYMBOL_ENUM = sorted(SYMBOL_REGISTRY.keys())
 
-# Constructed only if the key is present -- import must never raise just
-# because the key hasn't been added to .env yet; the route handler below
-# checks for None and fails closed with a clean 503 instead.
-_api_key = os.environ.get("ANTHROPIC_API_KEY")
-_client = anthropic.Anthropic(api_key=_api_key) if _api_key else None
+def _anthropic():
+    """The SDK, imported on demand.
+
+    Module-scope `import anthropic` would make the package a hard
+    requirement of starting the API at all, including on the demo
+    deployment where /api/chat is removed and no key exists. Keeping it
+    lazy lets that box install neither the SDK nor schwab-py -- the flag
+    removes the route, and the absent library means there is nothing to
+    call even if it did not.
+    """
+    import anthropic
+
+    return anthropic
+
+
+def _client():
+    """A client, or None when no key is configured.
+
+    Built per call rather than once at import so a missing key is a clean
+    503 from the handler rather than an exception during startup -- and so
+    tests can set the variable without reimporting the module.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    return _anthropic().Anthropic(api_key=api_key) if api_key else None
 
 
 # ---------------------------------------------------------------------------
@@ -306,11 +325,12 @@ def _extract_text(response) -> str:
 
 
 def run_chat_turn(message: str, history: list[dict]) -> str:
+    client = _client()
     messages: list[dict] = [*history, {"role": "user", "content": message}]
     tool_schemas = [spec.schema for spec in TOOLS.values()]
 
     for _ in range(MAX_ITERATIONS):
-        response = _client.messages.create(
+        response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
@@ -328,7 +348,7 @@ def run_chat_turn(message: str, history: list[dict]) -> str:
 
     # Iteration cap hit -- force one final prose answer from whatever was
     # already gathered instead of looping forever or returning nothing.
-    final = _client.messages.create(
+    final = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
@@ -361,8 +381,11 @@ class ChatResponse(BaseModel):
 
 @router.post("/chat")
 def chat(req: ChatRequest) -> ChatResponse:
-    if _client is None:
+    # Spends ANTHROPIC_API_KEY with no per-caller cap. See src/api/demo.py.
+    block_in_demo("Chat")
+    if _client() is None:
         raise HTTPException(503, "Chat is not configured -- set ANTHROPIC_API_KEY in .env and restart the server.")
+    anthropic = _anthropic()
     try:
         reply = run_chat_turn(req.message, [m.model_dump() for m in req.history])
     except anthropic.AuthenticationError:

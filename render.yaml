@@ -1,0 +1,67 @@
+# Render blueprint for the public demo backend (DEMO_MODE=1).
+#
+# Deploy: Render dashboard -> New -> Blueprint -> point at this repo.
+#
+# The three things that make this safe, in order of importance:
+#
+#   1. No credentials. There is no SCHWAB_API_KEY, SCHWAB_APP_SECRET,
+#      SCHWAB_TOKEN_B64 or ANTHROPIC_API_KEY below, and none should ever be
+#      added. Everything else here is defence in depth; this is the actual
+#      protection.
+#   2. requirements-demo.txt omits schwab-py and anthropic, so the machine
+#      cannot reach either service even if a route were exposed by mistake.
+#   3. DEMO_MODE=1 removes POST /api/refresh and POST /api/chat.
+#
+# The database
+# ------------
+# The demo serves a frozen snapshot built by `python -m src.build_demo_db`.
+# It is NOT in the repo: the live chain database is ~260MB in Git LFS, and
+# pulling LFS on every deploy would spend a quarter of the free monthly
+# bandwidth each time. Upload the trimmed file as a GitHub Release asset and
+# set DEMO_DB_URL to it -- see the build command below and DEPLOYING.md.
+
+services:
+  - type: web
+    name: vol-dashboard-demo-api
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+
+    buildCommand: |
+      pip install -r requirements-demo.txt
+      # Fetch the trimmed demo database. Fail loudly rather than deploying an
+      # API with no data behind it -- a 500 on every page is harder to
+      # diagnose after the fact than a failed build.
+      if [ -z "$DEMO_DB_URL" ]; then
+        echo "DEMO_DB_URL is not set. Build one with 'python -m src.build_demo_db',"
+        echo "upload it as a GitHub Release asset, and set DEMO_DB_URL to that URL."
+        exit 1
+      fi
+      mkdir -p demo-data
+      curl -fsSL "$DEMO_DB_URL" -o demo-data/schwab_database.db
+      python -c "import sqlite3,sys; n=sqlite3.connect('demo-data/schwab_database.db').execute('select count(*) from options').fetchone()[0]; print(f'demo database: {n:,} contracts'); sys.exit(0 if n else 1)"
+
+    startCommand: uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
+
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13"
+      - key: DEMO_MODE
+        value: "1"
+      # The Vercel domain serving the frontend. CORS only constrains
+      # browsers -- it is not what keeps this deployment safe (see above) --
+      # but leaving it open would let any page script-read the API through a
+      # visitor, for no benefit.
+      - key: FRONTEND_ORIGIN
+        sync: false
+      # Points data_loader at the downloaded snapshot instead of the
+      # repo path, which does not exist on this box.
+      - key: SCHWAB_DB_PATH
+        value: demo-data/schwab_database.db
+      # Set in the Render dashboard, not here: the URL changes each time you
+      # publish a fresher snapshot.
+      - key: DEMO_DB_URL
+        sync: false

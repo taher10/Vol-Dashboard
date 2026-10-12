@@ -6,11 +6,16 @@ import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, ApiError } from "@/lib/api";
 import { useSettingsStore } from "@/lib/store";
+import { useDemoMode } from "@/lib/use-demo-mode";
 import { cn } from "@/lib/utils";
 
 type Status = { type: "success" | "info" | "error"; message: string } | null;
 
 export function RefreshButton() {
+  // Gated here rather than at the two call sites (site-header and
+  // app-sidebar): one of them would eventually be missed, and a third
+  // mount added later would be unguarded by default.
+  const demo = useDemoMode();
   const symbols = useSettingsStore((s) => s.symbols);
   const bumpRefreshNonce = useSettingsStore((s) => s.bumpRefreshNonce);
   const [loading, setLoading] = useState(false);
@@ -21,6 +26,10 @@ export function RefreshButton() {
     const t = setTimeout(() => setStatus(null), 6000);
     return () => clearTimeout(t);
   }, [status]);
+
+  // Hidden until health confirms this is not the demo -- see useDemoMode
+  // for why unknown is treated as hidden.
+  if (demo !== false) return null;
 
   const handleClick = async () => {
     setLoading(true);

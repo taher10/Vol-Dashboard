@@ -24,6 +24,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import chat
+from .demo import demo_mode
 from .routes import router
 
 app = FastAPI(
@@ -51,4 +52,11 @@ app.include_router(chat.router)
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok"}
+    """Liveness, plus the demo flag.
+
+    The frontend hides the controls for the routes DEMO_MODE removes, and it
+    reads the flag from here rather than from its own build-time variable:
+    two flags drift, and the failure that produces is a button that is still
+    rendered and simply errors when clicked.
+    """
+    return {"status": "ok", "demo_mode": demo_mode()}

@@ -46,3 +46,4 @@ env/
 #
 database/local*.db
 database/*.local.db
+demo-data/
