@@ -30,7 +30,10 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest -- see daily-snapshot.yml. This job
+    # guards the collection pipeline, so it should not be the thing that
+    # breaks on an unannounced runner-image change.
+    runs-on: ubuntu-24.04
     steps:
       # No lfs: true, deliberately. This job reads history/vol_history.db,
       # a normal git object. database/schwab_database.db is LFS-tracked and

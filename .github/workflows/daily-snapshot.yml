@@ -51,7 +51,13 @@ permissions:
 
 jobs:
   snapshot:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest. That label migrates to Ubuntu 26 on
+    # 2026-10-19, and this job collects market data that cannot be refetched:
+    # Schwab serves current chains only, so a session missed to a surprise
+    # image change is a permanent hole in the history, not a rerun away. The
+    # tests workflow deliberately stays on ubuntu-latest so the new image is
+    # still exercised somewhere -- it just fails somewhere harmless first.
+    runs-on: ubuntu-24.04
     steps:
       # lfs: true installs the LFS filters/hooks this checkout needs both to
       # pull the existing LFS-tracked database/schwab_database.db and to

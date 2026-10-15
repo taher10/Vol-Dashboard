@@ -24,6 +24,10 @@ permissions:
 
 jobs:
   pytest:
+    # Deliberately NOT pinned, while the four data workflows are. Something
+    # has to meet the next runner image first, and this is the job where
+    # finding out is free -- a red tests run costs a rerun, a broken
+    # collection costs a trading session that cannot be refetched.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

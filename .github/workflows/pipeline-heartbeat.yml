@@ -26,7 +26,10 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest -- see daily-snapshot.yml. This job
+    # guards the collection pipeline, so it should not be the thing that
+    # breaks on an unannounced runner-image change.
+    runs-on: ubuntu-24.04
     steps:
       - name: Check the daily snapshot workflow ran recently
         run: |
