@@ -16,9 +16,13 @@ name: Daily vol snapshot
 # started silently failing at the final "Commit history" step (fetch/token
 # steps still succeeded, so this was easy to miss). Tracked via Git LFS
 # (.gitattributes) since 2026-08-20 to fix that; see actions/checkout's
-# `lfs: true` below. Free-tier GitHub LFS storage/bandwidth is 1GB/month --
-# at the same growth rate that's ~10 weeks of runway before this needs a
-# retention window (trim old raw snapshots) or a paid data pack. A live pull
+# `lfs: true` below. The LFS allowance was long assumed here to be 1GB/month
+# with "~10 weeks of runway"; the billing page on 2026-10-15 showed 10GB
+# included, 1.8GB of storage used and 0GB of bandwidth metered -- public-repo
+# discounts appear to absorb the daily fetch entirely. The file still grows
+# ~10MB/day, so a retention window is worth having eventually, but it is not
+# the near-term constraint this comment spent months claiming it was. Check
+# github.com/settings/billing before acting on any figure here. A live pull
 # with no usable quotes (outside market hours) raises LiveDataUnavailableError
 # and neither file gets touched that day -- see src/data_quality.py.
 #
@@ -112,10 +116,13 @@ jobs:
 
       # Runs HERE rather than in data-validation.yml because this job already
       # fetches LFS (it has to, to write the chain DB) and so has the real
-      # 172MB file on disk. Pulling that into the daily validation job instead
-      # would cost 172MB/day against a 1GB/month free LFS tier -- under a
-      # week's runway. Placed after the commit deliberately: a validation
-      # failure should flag the problem, never discard the day's data.
+      # ~390MB file on disk. The original reason -- that a second daily fetch
+      # would exhaust a 1GB/month bandwidth tier -- turned out to be wrong
+      # (2026-10-15: 10GB included, 0GB metered). Keeping it here anyway,
+      # because validating the file this job just wrote is the more direct
+      # arrangement regardless of cost. Placed after the commit deliberately:
+      # a validation failure should flag the problem, never discard the day's
+      # data.
       - name: Validate what was collected
         run: python -m src.validate_collection --max-stale-days 3
 

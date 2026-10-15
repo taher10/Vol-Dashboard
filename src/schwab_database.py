@@ -39,7 +39,9 @@ Usage
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
+from io import StringIO
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -48,6 +50,34 @@ import pandas as pd
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB_PATH = _PROJECT_ROOT / "database" / "schwab_database.db"
+
+def _encode_frame(df: pd.DataFrame) -> str:
+    """Serialise a metric frame, recording which columns are datetimes.
+
+    orient="split" alone loses that: a datetime64 column round-trips as
+    int64 epoch-milliseconds, so `expiration` came back as 1792108800000
+    instead of 2026-10-16 and every date on the page would have rendered as
+    a large number. The column names are stored explicitly rather than
+    sniffed on read -- guessing which string columns "look like dates" is
+    the sort of quiet wrongness that is hard to notice and worse than a
+    little verbosity here.
+    """
+    datetime_columns = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    return json.dumps({
+        "datetime_columns": datetime_columns,
+        "frame": df.to_json(orient="split", date_format="iso", index=False),
+    })
+
+
+def _decode_frame(payload: str) -> pd.DataFrame:
+    """Inverse of _encode_frame, restoring datetime dtypes."""
+    wrapper = json.loads(payload)
+    df = pd.read_json(StringIO(wrapper["frame"]), orient="split")
+    for column in wrapper.get("datetime_columns", []):
+        if column in df.columns:
+            df[column] = pd.to_datetime(df[column])
+    return df
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS options (
@@ -90,6 +120,24 @@ CREATE TABLE IF NOT EXISTS stock_prices (
     PRIMARY KEY (symbol, price_date)
 );
 CREATE INDEX IF NOT EXISTS idx_stock_prices_symbol_date ON stock_prices (symbol, price_date);
+
+-- Metric tables (term structure, skew, curvature, VRP) computed ahead of time
+-- for one (symbol, snapshot_date). Normally absent: the live dashboard
+-- recomputes from the chain it is serving, which is what makes a chain/metrics
+-- date mismatch impossible. A frozen demo snapshot has no such risk -- nothing
+-- changes after the build -- and recomputation is far too slow there, so the
+-- demo builder fills this in. See src/dashboard/data_loader.py.
+--
+-- One row per metric, payload as JSON rather than five typed tables: the
+-- metric frames have different and occasionally changing columns, and a schema
+-- per metric would need migrating every time VolatilityMetrics grows one.
+CREATE TABLE IF NOT EXISTS precomputed_metrics (
+    symbol          TEXT NOT NULL,
+    snapshot_date   TEXT NOT NULL,
+    metric_name     TEXT NOT NULL,
+    payload         TEXT NOT NULL,  -- see _encode_frame: JSON frame + datetime column names
+    PRIMARY KEY (symbol, snapshot_date, metric_name)
+);
 """
 
 _OPTIONS_CHAIN_COLUMNS = {
@@ -132,7 +180,7 @@ class SchwabDatabase:
     def __init__(self, db_path: Path | str | None = None) -> None:
         # SCHWAB_DB_PATH lets a local dev session write somewhere other than the
         # committed database. That file is tracked and the daily workflow
-        # commits a new 172MB version of it every night, so any local write --
+        # commits a new ~390MB version of it every night, so any local write --
         # clicking "Refresh Live Data", or any /api/refresh call -- leaves the
         # working tree dirty and blocks the next `git pull` with "local changes
         # would be overwritten". .gitignore can't help: it only applies to
@@ -315,6 +363,41 @@ class SchwabDatabase:
                 conn,
                 params=(symbol, contract_symbol),
             )
+
+    def write_precomputed_metrics(self, symbol: str, snapshot_date: date, metrics: dict) -> int:
+        """Store already-computed metric frames for one (symbol, date)."""
+        rows = [
+            (symbol, snapshot_date.isoformat(), name, _encode_frame(df))
+            for name, df in metrics.items()
+            if df is not None and not df.empty
+        ]
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO precomputed_metrics "
+                "(symbol, snapshot_date, metric_name, payload) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+        return len(rows)
+
+    def precomputed_metrics(self, symbol: str, snapshot_date: date) -> dict:
+        """Stored metric frames for one (symbol, date), or {} when absent.
+
+        Absent is the normal case and not an error -- only a demo build fills
+        this table. Returning {} lets the caller fall through to computing
+        them, so the same code path serves both.
+        """
+        with self._connect() as conn:
+            try:
+                rows = conn.execute(
+                    "SELECT metric_name, payload FROM precomputed_metrics "
+                    "WHERE symbol = ? AND snapshot_date = ?",
+                    (symbol, snapshot_date.isoformat()),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return {}  # table predates this feature
+        return {name: _decode_frame(payload) for name, payload in rows}
 
     def latest_options_snapshot_date(self, symbol: str) -> date | None:
         """The most recent date with a stored chain for `symbol`, or None.

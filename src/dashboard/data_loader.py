@@ -130,9 +130,22 @@ def _cached_bundle(save_symbol: str, snapshot_date: date, _fingerprint: float) -
     chain = adapt_db_chain(db.options_snapshot(save_symbol, snapshot_date))
 
     prices = db.price_series(save_symbol)
-    metrics = VolatilityMetrics(
-        chain, price_history=prices if not prices.empty else None
-    ).compute_all()
+
+    # Stored metrics when the database carries them, computed otherwise.
+    #
+    # Recomputing is the right default and stays the default: the metrics are
+    # derived entirely from the chain, so deriving them from the same rows
+    # being served makes a chain/metrics date mismatch structurally
+    # impossible. That argument does not apply to a frozen snapshot, where
+    # nothing changes after the build -- and there the cost is severe.
+    # compute_all() takes ~150ms per symbol on a laptop but ~5s on a
+    # throttled free-tier CPU, so a 24-symbol leaderboard took 237 seconds
+    # cold on the public demo. Reading them instead makes that a query.
+    metrics = db.precomputed_metrics(save_symbol, snapshot_date)
+    if not metrics:
+        metrics = VolatilityMetrics(
+            chain, price_history=prices if not prices.empty else None
+        ).compute_all()
 
     if "fetchTime" in chain.columns and not chain["fetchTime"].isna().all():
         as_of = pd.Timestamp(chain["fetchTime"].max())
