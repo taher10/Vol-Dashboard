@@ -37,10 +37,16 @@ jobs:
     steps:
       # No lfs: true, deliberately. This job reads history/vol_history.db,
       # a normal git object. database/schwab_database.db is LFS-tracked and
-      # 172MB; fetching it daily would burn the 1GB/month free bandwidth tier
-      # in under a week. The validator's raw-chain cross-check therefore
-      # reports itself SKIPPED here and runs in daily-snapshot.yml instead,
-      # which already fetches LFS to write that file.
+      # ~390MB, and this job never reads it, so fetching it here would be
+      # pure waste. The validator's raw-chain cross-check therefore reports
+      # itself SKIPPED here and runs in daily-snapshot.yml instead, which
+      # already fetches LFS to write that file.
+      #
+      # This was originally justified by a 1GB/month LFS bandwidth tier that
+      # would be "exhausted in under a week". That figure was wrong -- the
+      # billing page on 2026-10-15 showed 10GB included and 0GB metered --
+      # but the arrangement stands on its own: do not download 390MB you
+      # will not open.
       #
       # Adding that cross-check without this comment being updated is what
       # broke run #2 on 2026-09-15: the validator opened the LFS pointer as

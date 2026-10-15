@@ -137,14 +137,16 @@ def _depth_problems(symbol: str, stats: list[dict], thin_fraction: float) -> lis
 def open_chain_db() -> tuple["SchwabDatabase | None", str | None]:
     """Open the raw chain database, or explain why it couldn't be.
 
-    database/schwab_database.db is 172MB and Git LFS-tracked. A checkout
+    database/schwab_database.db is ~390MB and Git LFS-tracked. A checkout
     without `lfs: true` leaves a ~130-byte pointer file at that path, and
     opening it raises `sqlite3.DatabaseError: file is not a database` -- which
     is exactly how the 2026-09-15 validation run died once this cross-check
     was added to a workflow that deliberately skips LFS.
 
-    Pulling LFS on a daily job isn't the answer either: 172MB a day against
-    the 1GB/month free bandwidth tier exhausts the quota in under a week. So
+    Pulling LFS on a daily job isn't the answer either -- not for the cost
+    (the billing page on 2026-10-15 showed 10GB included and 0GB metered,
+    so the 1GB/month figure this once cited was simply wrong) but because
+    there is no reason to download ~390MB a job never opens. So
     the cross-check runs where the file already exists (the snapshot job,
     which must fetch LFS to write it) and reports itself skipped elsewhere.
     Returns (db, None) on success, (None, reason) otherwise.

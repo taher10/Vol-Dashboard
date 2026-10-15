@@ -30,6 +30,7 @@ import argparse
 import shutil
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -100,6 +101,8 @@ def build(days: int, out_dir: Path, min_symbols: int = 20) -> None:
     conn.execute("VACUUM")
     conn.close()
 
+    _precompute_metrics(chain_out, keep[0])
+
     if HISTORY_DB.exists():
         shutil.copy2(HISTORY_DB, history_out)
         print(f"Copied {HISTORY_DB.name} whole ({_mb(HISTORY_DB):.1f} MB) -- IV Rank needs the long series")
@@ -112,6 +115,49 @@ def build(days: int, out_dir: Path, min_symbols: int = 20) -> None:
     print()
     print("Serve it with:")
     print(f"  DEMO_MODE=1 SCHWAB_DB_PATH={chain_out} uvicorn src.api.main:app")
+
+
+def _precompute_metrics(chain_db: Path, newest_day: str) -> None:
+    """Compute each symbol's metrics once, at build time, and store them.
+
+    The demo runs on a free-tier CPU roughly 30x slower than a laptop:
+    compute_all() costs ~150ms per symbol locally and ~5s there, so a
+    24-symbol leaderboard took 237 SECONDS on its first request, and the
+    instance sleeps after 15 minutes so that cost recurs for every visitor
+    after a quiet spell. Nobody waits that long.
+
+    Doing it here is safe in a way it would not be for the live dashboard:
+    this snapshot is frozen, so stored metrics can never drift out of date
+    with the chain beside them. Only the newest day is precomputed, because
+    that is the one every page reads.
+    """
+    import os
+
+    os.environ["SCHWAB_DB_PATH"] = str(chain_db)
+    from src.dashboard.data_loader import adapt_db_chain
+    from src.metrics import VolatilityMetrics
+    from src.schwab_database import SchwabDatabase
+    from src.symbols import SYMBOL_REGISTRY
+
+    db = SchwabDatabase(db_path=chain_db)
+    day = date.fromisoformat(newest_day)
+    print(f"Precomputing metrics for {newest_day} (makes the demo fast) ...")
+
+    done = skipped = 0
+    for symbol in SYMBOL_REGISTRY:
+        chain = adapt_db_chain(db.options_snapshot(symbol, day))
+        if chain is None or chain.empty:
+            skipped += 1
+            continue
+        prices = db.price_series(symbol)
+        metrics = VolatilityMetrics(
+            chain, price_history=prices if not prices.empty else None
+        ).compute_all()
+        if db.write_precomputed_metrics(symbol, day, metrics):
+            done += 1
+        else:
+            skipped += 1
+    print(f"  stored metrics for {done} symbols" + (f", skipped {skipped}" if skipped else ""))
 
 
 def main() -> int:
