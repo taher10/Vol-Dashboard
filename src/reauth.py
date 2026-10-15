@@ -65,7 +65,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import schwab
 
 from src.auth import SchwabAuth
-from src.token_sync import SECRET_NAME, sync_token_to_secret
+from src.token_sync import SECRET_NAME, repo_from_git_remote, sync_token_to_secret
 
 # Schwab invalidates the refresh token 7 days after the browser authorisation.
 # Reported here so the next re-auth is a calendar entry rather than a surprise.
@@ -76,24 +76,6 @@ def _is_loopback(callback_url: str) -> bool:
     """True when schwab-py can catch the redirect itself with a local server."""
     host = (urlparse(callback_url).hostname or "").lower()
     return host in {"127.0.0.1", "localhost", "::1"}
-
-
-def _repo_from_git_remote() -> str | None:
-    """Derive "owner/repo" from origin, so GITHUB_REPOSITORY (which only
-    Actions sets automatically) doesn't have to be configured by hand."""
-    try:
-        url = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=_PROJECT_ROOT, capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-    url = url.removesuffix(".git")
-    if url.startswith("git@"):  # git@github.com:owner/repo
-        url = url.partition(":")[2]
-    else:  # https://github.com/owner/repo
-        url = urlparse(url).path.lstrip("/")
-    return url if url.count("/") == 1 else None
 
 
 def _token_created_at(token_path: Path) -> datetime | None:
@@ -196,7 +178,7 @@ def _push_to_secret(token_path: Path, created_at: datetime) -> int:
     expires = created_at + timedelta(days=TOKEN_LIFETIME_DAYS)
 
     if not os.environ.get("GITHUB_REPOSITORY"):
-        if repo := _repo_from_git_remote():
+        if repo := repo_from_git_remote():
             os.environ["GITHUB_REPOSITORY"] = repo
 
     if not os.environ.get("SECRETS_PAT"):

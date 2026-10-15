@@ -55,14 +55,17 @@ import base64
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import httpx
+from dotenv import load_dotenv
 from nacl import encoding, public
 
 logging.basicConfig(
@@ -74,6 +77,29 @@ logger = logging.getLogger("token_sync")
 
 SECRET_NAME = "SCHWAB_TOKEN_B64"
 API_BASE = "https://api.github.com"
+
+
+def repo_from_git_remote() -> str | None:
+    """Derive "owner/repo" from origin.
+
+    GITHUB_REPOSITORY is set automatically inside Actions and nowhere else,
+    so without this a local run has to be told which repo it is talking to --
+    which is how `python -m src.token_sync` came to report "not configured"
+    on a machine that was perfectly well configured.
+    """
+    try:
+        url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=_PROJECT_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    url = url.removesuffix(".git")
+    if url.startswith("git@"):  # git@github.com:owner/repo
+        url = url.partition(":")[2]
+    else:  # https://github.com/owner/repo
+        url = urlparse(url).path.lstrip("/")
+    return url if url.count("/") == 1 else None
 
 
 class TokenSyncMisconfiguredError(Exception):
@@ -103,8 +129,17 @@ def sync_token_to_secret(token_path: Path | None = None) -> bool:
     Returns True if the secret was updated, False if skipped (no PAT
     configured, not running against a GitHub repo, or no token file to sync).
     """
+    # load_dotenv() never overrides variables already set, so CI keeps its
+    # own values; this only fills the gap for a local run. Without it
+    # `python -m src.token_sync` could not see the SECRETS_PAT sitting in
+    # .env, while the same function called from src.reauth could -- because
+    # SchwabAuth.from_env() happened to have loaded .env first. Same command,
+    # different answer depending on the caller, which is a bad way for a
+    # credential tool to behave.
+    load_dotenv(_PROJECT_ROOT / ".env")
+
     pat = os.environ.get("SECRETS_PAT")
-    repo = os.environ.get("GITHUB_REPOSITORY")  # "owner/repo", auto-set in Actions
+    repo = os.environ.get("GITHUB_REPOSITORY") or repo_from_git_remote()
     in_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     if not pat or not repo:
         if in_ci:
