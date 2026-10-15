@@ -26,7 +26,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from src import data_quality
 from src.data_quality import LiveDataUnavailableError
-from src.dashboard import backtest_engine, data_loader, decision_engine, insights, strategy_engine
+from src.dashboard import backtest_engine, data_loader, data_sync, decision_engine, insights, strategy_engine
 from src.dashboard import data_trust as data_trust_report
 from src.dashboard import vol_surface
 from src.dashboard.data_loader import SnapshotBundle
@@ -1212,6 +1212,27 @@ def metric_series(
 # button. See module docstring: mutating + credential-backed, personal-use
 # only for now.
 # ---------------------------------------------------------------------------
+
+
+@router.post("/sync")
+def sync() -> dict:
+    """Fetch whatever the daily pipeline has already collected.
+
+    This is what the dashboard's refresh control calls. It does NOT touch
+    Schwab -- see src/dashboard/data_sync.py for why a live pull became the
+    wrong operation once the dashboard started reading the committed
+    database. Gated in demo mode because the deployment serves a frozen
+    snapshot and has no git remote to pull from.
+    """
+    block_in_demo("Data sync")
+    result = data_sync.pull_latest()
+    return {
+        "changed": result.changed,
+        "message": result.message,
+        "before": result.before,
+        "after": result.after,
+        "seconds": result.seconds,
+    }
 
 
 @router.post("/refresh")

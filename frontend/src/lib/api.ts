@@ -544,6 +544,14 @@ export interface BacktestRunParams {
 
 /** `demo_mode` is true on the shared deployment, where the credential-backed
  * routes (/api/refresh, /api/chat) are removed. See src/api/demo.py. */
+export interface SyncResponse {
+  changed: boolean;
+  message: string;
+  before: string | null;
+  after: string | null;
+  seconds: number | null;
+}
+
 export interface HealthResponse {
   status: string;
   demo_mode: boolean;
@@ -585,6 +593,11 @@ export const api = {
       `/api/history/${symbol}/metric-series`,
       { metric, target_dte: targetDte, lookback_days: lookbackDays }
     ),
+
+  /** Pulls whatever the daily pipeline has collected. Does NOT call Schwab --
+   * see src/dashboard/data_sync.py for why a live pull is the wrong
+   * operation now that the dashboard reads the committed database. */
+  sync: () => apiPost<SyncResponse>("/api/sync", {}),
 
   refresh: (symbols: string[]) => apiPost<RefreshResponse>("/api/refresh", { symbols: symbols.join(",") }),
 

@@ -11,12 +11,23 @@ import { cn } from "@/lib/utils";
 
 type Status = { type: "success" | "info" | "error"; message: string } | null;
 
+/** Pulls the data the daily pipeline has already collected.
+ *
+ * This used to trigger a live Schwab fetch. That became wrong once the
+ * dashboard started reading the committed database, and then actively
+ * harmful: a successful pull rotates the Schwab refresh token, invalidating
+ * the copy in SCHWAB_TOKEN_B64 and stopping the next scheduled collection.
+ * Outside market hours it did nothing instead, and a developer's local token
+ * goes stale within a day of CI's next run -- so the common outcome was a
+ * raw OAuth error for an operation that should not have been offered.
+ *
+ * What a user means by "refresh" here is "show me the latest collected
+ * data", which is a git pull. See src/dashboard/data_sync.py. */
 export function RefreshButton() {
   // Gated here rather than at the two call sites (site-header and
   // app-sidebar): one of them would eventually be missed, and a third
   // mount added later would be unguarded by default.
   const demo = useDemoMode();
-  const symbols = useSettingsStore((s) => s.symbols);
   const bumpRefreshNonce = useSettingsStore((s) => s.bumpRefreshNonce);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<Status>(null);
@@ -35,32 +46,17 @@ export function RefreshButton() {
     setLoading(true);
     setStatus(null);
     try {
-      const res = await api.refresh(symbols);
-      if (res.failed.length > 0) {
-        const failedNote = res.failed.map((f) => `${f.symbol}: ${f.error}`).join(" ");
-        setStatus({
-          type: "error",
-          message: res.succeeded.length
-            ? `Refreshed ${res.succeeded.join(", ")}; failed: ${failedNote}`
-            : `Refresh failed: ${failedNote}`,
-        });
-      } else if (res.unavailable.length > 0) {
-        setStatus({
-          type: "info",
-          message: res.succeeded.length
-            ? `Refreshed ${res.succeeded.join(", ")}. Live data unavailable for ${res.unavailable.map((u) => u.symbol).join(", ")} (likely outside market hours) — still showing the last available snapshot.`
-            : `Live data unavailable right now (likely outside market hours) — still showing the last available snapshot.`,
-        });
-      } else {
-        setStatus({ type: "success", message: `Refreshed: ${res.succeeded.join(", ")}.` });
-      }
-      if (res.succeeded.length > 0) {
+      const res = await api.sync();
+      setStatus({ type: res.changed ? "success" : "info", message: res.message });
+      if (res.changed) {
+        // Chain and metrics both come from the files just replaced, so every
+        // open page is now showing superseded numbers.
         bumpRefreshNonce();
       }
     } catch (err) {
       setStatus({
         type: "error",
-        message: err instanceof ApiError ? err.message : "Refresh failed — is the backend running?",
+        message: err instanceof ApiError ? err.message : "Sync failed — is the backend running?",
       });
     } finally {
       setLoading(false);
@@ -77,7 +73,7 @@ export function RefreshButton() {
         disabled={loading}
       >
         <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-        {loading ? "Refreshing…" : "Refresh Live Data"}
+        {loading ? "Syncing…" : "Sync Latest Data"}
       </Button>
       {status && (
         <p
