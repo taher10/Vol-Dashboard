@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from functools import lru_cache
+from pathlib import Path
+from functools import lru_cache, wraps
 from typing import Literal
 
 import pandas as pd
@@ -199,6 +200,53 @@ def list_symbols() -> list[SymbolOut]:
 # ---------------------------------------------------------------------------
 
 
+def _data_fingerprint() -> tuple[float, float]:
+    """Modification times of the two databases every leaderboard reads.
+
+    Used as a cache key so a changed file evicts the rows derived from it:
+    the chain database arrives with each `git pull`, and the metric history
+    is rewritten by the same commit. Cheaper and more honest than a TTL,
+    which would either serve stale rows for its duration or expire rows that
+    are still perfectly good.
+    """
+    def mtime(path) -> float:
+        try:
+            return Path(path).stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return mtime(_db().db_path), mtime(_history_store.db_path)
+
+
+def _data_cached(fn):
+    """Cache a leaderboard row against the current data.
+
+    Precomputing the metrics made loading a bundle essentially free (6.7ms
+    for all 24 symbols), which exposed where the time actually goes: 98% of
+    a scanner request is per-symbol z-score lookups against the history
+    database and decision_engine scoring, and none of that was cached. On
+    the free-tier CPU the demo runs on -- roughly 30x slower than a laptop --
+    that was ~9.5s for a warm leaderboard.
+
+    These functions are pure given the two databases, so the result can be
+    held until a file changes. Callers must treat the returned dict as
+    read-only: it is shared between requests, and today every caller only
+    reads from it (values are copied into a fresh response dict). Mutating
+    one would corrupt every later response.
+    """
+    cached = lru_cache(maxsize=1024)(lambda _fingerprint, *args, **kwargs: fn(*args, **kwargs))
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        return cached(_data_fingerprint(), *args, **kwargs)
+
+    wrapper.cache_clear = cached.cache_clear
+    wrapper.cache_info = cached.cache_info
+    wrapper.__wrapped__ = fn
+    return wrapper
+
+
+@_data_cached
 def _scanner_row(symbol: str, target_dte: int) -> dict:
     """One representative-expiry row for `symbol` -- the closest-to-
     target_dte row from score_expiries(), so every field in the row shares
@@ -354,6 +402,7 @@ def scanner_pcr(expiration: str | None = Query(None)) -> dict:
     return _pcr_snapshot(expiration)
 
 
+@_data_cached
 def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta: float) -> dict | None:
     """One symbol's calendar-edge estimate for the Vol Scanner's leaderboard
     -- picks this symbol's own nearest-available expirations to
@@ -454,6 +503,7 @@ def scanner_calendar_edge(
     return {"front_dte": front_dte, "back_dte": back_dte, "target_delta": target_delta, "rows": rows}
 
 
+@_data_cached
 def _delta_neutral_row(symbol: str, target_dte: int, target_delta: float) -> dict | None:
     """One symbol's straddle/strangle screen -- reuses the SAME richness_z
     signal already computed for the Vol Scanner table (decision_engine.
@@ -513,6 +563,7 @@ def scanner_delta_neutral(
     return {"target_dte": target_dte, "target_delta": target_delta, "rows": rows}
 
 
+@_data_cached
 def _term_structure_row(symbol: str, near_dte: int, far_dte: int) -> dict | None:
     """One symbol's term-structure and skew-term-structure slope -- the
     near/far ATM IV and skew read straight off metrics already computed by
@@ -565,6 +616,7 @@ def _term_structure_row(symbol: str, near_dte: int, far_dte: int) -> dict | None
     }
 
 
+@_data_cached
 def _gamma_exposure_row(symbol: str, target_dte: int = 30) -> dict | None:
     """Unsigned dollar-gamma concentration for one symbol at its expiration
     nearest target_dte, read straight from bundle.chain the same way
@@ -1050,6 +1102,7 @@ _DEFAULT_MAX_TRADE_IDEAS = 8  # "efficient, not overloaded" (explicit user requi
                           # notable signals rather than everything that happens to clear the bar.
 
 
+@_data_cached
 def _trade_idea(symbol: str) -> dict | None:
     """One trade idea for `symbol`, built from the exact same "notable
     expiry" selection and insights.expiry_commentary() call overview()'s
