@@ -38,7 +38,12 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from src.auth import SchwabAuth
-from src.data_quality import LiveDataUnavailableError, is_chain_usable, is_regular_market_hours
+from src.data_quality import (
+    LiveDataUnavailableError,
+    is_chain_usable,
+    is_regular_market_hours,
+    market_session_date,
+)
 from src.data_store import CSVStore
 from src.metrics import VolatilityMetrics
 from src.options_fetcher import OptionsFetcher
@@ -203,7 +208,11 @@ class OptionsVolJob:
         # while history/vol_history.db, whose caller already passed one
         # run-wide date, correctly recorded all 24 under 09-14. The two
         # databases disagreed about the same run.
-        snapshot_date = snapshot_date or datetime.now(UTC).date()
+        # Falls back to the market session rather than the UTC date, for
+        # the same reason daily_snapshot passes one in: a run that finishes
+        # after midnight UTC is still the same trading evening in New York,
+        # and dating it "tomorrow" misaligns every history-indexed metric.
+        snapshot_date = snapshot_date or market_session_date()
         self._db.append_options_snapshot(self.save_symbol, snapshot_date, chain)
 
         # 3c. Price history for VRP (realized vol vs. implied) -- see run()'s
