@@ -16,7 +16,7 @@ garbage (all-NaN term structure, no skew/curvature).
 
 from __future__ import annotations
 
-from datetime import datetime, time as _time, UTC
+from datetime import date, datetime, time as _time, timedelta, UTC
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -46,6 +46,42 @@ def is_chain_usable(chain: pd.DataFrame | None, min_valid_fraction: float = 0.5)
     iv = chain["impliedVolatility"]
     valid = iv.notna() & (iv > 0) & (iv < 500)  # -999 sentinel is excluded by > 0 alone; 500% is a generous sanity cap
     return bool(valid.mean() >= min_valid_fraction)
+
+
+def market_session_date(now: datetime | None = None) -> date:
+    """Which US market session the quotes being fetched belong to.
+
+    Snapshots were dated `datetime.now(UTC).date()`, which is wrong whenever
+    the collection runs late. The cron fires at 21:30 UTC -- 17:30 ET, after
+    the close -- but GitHub's queue has been delaying runs two to three
+    hours, and 21:30 + 3h crosses midnight UTC while it is still only 20:30
+    the same evening in New York. The run then filed Wednesday's closing
+    quotes under Thursday.
+
+    That is not cosmetic. IV Rank, the trailing z-scores, VRP and the
+    backtest all index on snapshot_date, so a shifted label misaligns every
+    historical comparison by a day -- and it produced impossible rows, like
+    a 2026-09-26 snapshot on a Saturday. Three of four collections in
+    mid-October were a day late before this existed.
+
+    Measuring in US/Eastern fixes it by construction: the market's own day
+    does not roll over until midnight ET, hours after any plausible
+    collection delay.
+
+    Before the open the session has not happened yet, so the quotes are the
+    previous trading day's close -- walk back to it. Saturdays and Sundays
+    walk back to Friday the same way. Market holidays are not known here
+    (there is no maintained calendar in this project, see
+    is_regular_market_hours), so a holiday resolves to itself and the
+    collection for that day legitimately finds no usable quotes.
+    """
+    eastern = (now or datetime.now(UTC)).astimezone(_MARKET_TZ)
+    session = eastern.date()
+    if eastern.time() < _MARKET_OPEN:
+        session -= timedelta(days=1)
+    while session.weekday() >= 5:  # Saturday=5, Sunday=6
+        session -= timedelta(days=1)
+    return session
 
 
 def is_regular_market_hours(now: datetime | None = None) -> bool:

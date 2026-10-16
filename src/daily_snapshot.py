@@ -47,7 +47,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.data_quality import LiveDataUnavailableError
+from src.data_quality import LiveDataUnavailableError, market_session_date
 from src.history_store import HistoryStore
 from src.job import OptionsVolJob
 from src.notify import notify
@@ -125,7 +125,12 @@ def run(symbols: list[str]) -> dict[str, str]:
     """Fetch + append-to-history every symbol in `symbols`. Returns {symbol: 'ok'|error message}."""
     store = HistoryStore()
     results: dict[str, str] = {}
-    snapshot_date = datetime.now(UTC).date()
+    # The market session these quotes belong to, not the UTC wall clock.
+    # The cron fires at 21:30 UTC but GitHub's queue has been delaying runs
+    # two to three hours, which crosses midnight UTC while it is still the
+    # same evening in New York -- so Wednesday's close was filed under
+    # Thursday. See data_quality.market_session_date.
+    snapshot_date = market_session_date()
 
     for symbol in symbols:
         info = SYMBOL_REGISTRY.get(symbol)
