@@ -28,7 +28,7 @@ export function openCommandPalette() {
 
 /** Keyboard-first navigation, mounted once in the root layout.
  *
- * Getting from one symbol's backtest to another's used to mean reaching for
+ * Getting from one symbol's view to another's used to mean reaching for
  * the sidebar picker, then the page list -- two aimed clicks for something
  * done dozens of times a session. Everything here is reachable as
  * type-a-few-letters-then-Enter.
@@ -86,8 +86,8 @@ export function CommandPalette() {
   }
 
   // Symbol-scoped destinations resolve against the current primary, so
-  // "Backtest" means "backtest what I'm looking at" rather than dumping the
-  // user on a route with no symbol in it.
+  // "Strategy Builder" means "build for what I'm looking at" rather than
+  // dumping the user on a route with no symbol in it (which 404s).
   const pages = useMemo(
     () =>
       NAV.map((item) => ({

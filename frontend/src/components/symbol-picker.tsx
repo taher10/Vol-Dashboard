@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Check, ChevronsUpDown } from "lucide-react";
+import { Check, ChevronsUpDown, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -41,7 +41,7 @@ export function SymbolPicker() {
   // Runs the store mutation, then — only if it's a genuine user action, never
   // a background/hydration event, since this only ever executes inside a
   // real click handler — follows the user to the new primary symbol's
-  // version of whatever symbol-scoped page (Strategy Builder/Backtest)
+  // version of whatever symbol-scoped page (Strategy Builder)
   // they're currently on. An earlier attempt at this used a passive
   // "watch the store for changes" effect instead; it couldn't reliably tell
   // zustand's async localStorage rehydration apart from a real user change
@@ -70,41 +70,68 @@ export function SymbolPicker() {
           aria-expanded={open}
           className="w-full justify-between bg-sidebar-accent/40 border-sidebar-border text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
         >
-          <span className="flex items-center gap-1.5 overflow-hidden">
-            {symbols.slice(0, 3).map((sym) => {
+          <span className="flex flex-wrap items-center gap-1 overflow-hidden">
+            {symbols.map((sym) => {
               const info = allSymbols.find((s) => s.symbol === sym);
               const isPrimary = sym === primary;
+              // The last symbol has no remove button: emptying the list
+              // silently resets it to SPX (see store.toggleSymbol), which
+              // looks like a bug rather than a reset. Better to offer no
+              // affordance than one with a surprising outcome.
+              const removable = symbols.length > 1;
               return (
                 <span
                   key={sym}
-                  role={isPrimary ? undefined : "button"}
-                  tabIndex={isPrimary ? undefined : 0}
-                  onClick={(e) => {
-                    if (isPrimary) return;
-                    e.stopPropagation();
-                    applyAndFollow(() => setPrimary(sym));
-                  }}
-                  title={
-                    isPrimary
-                      ? "Primary symbol — drives Strategy Builder and Backtest"
-                      : `Click to make ${sym} the primary symbol`
-                  }
                   className={cn(
-                    "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium",
-                    isPrimary ? "bg-black/30 ring-1 ring-white/30" : "bg-black/20 hover:bg-black/30"
+                    "inline-flex items-center gap-1 rounded-full py-0.5 pl-2 text-xs font-medium",
+                    removable ? "pr-0.5" : "pr-2",
+                    isPrimary ? "bg-black/30 ring-1 ring-white/30" : "bg-black/20"
                   )}
                 >
+                  <span className="size-1.5 rounded-full" style={{ backgroundColor: info?.color ?? "#999" }} />
                   <span
-                    className="size-1.5 rounded-full"
-                    style={{ backgroundColor: info?.color ?? "#999" }}
-                  />
-                  {sym}
+                    role={isPrimary ? undefined : "button"}
+                    tabIndex={isPrimary ? undefined : 0}
+                    onClick={(e) => {
+                      if (isPrimary) return;
+                      e.stopPropagation();
+                      applyAndFollow(() => setPrimary(sym));
+                    }}
+                    onKeyDown={(e) => {
+                      if (isPrimary || (e.key !== "Enter" && e.key !== " ")) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      applyAndFollow(() => setPrimary(sym));
+                    }}
+                    title={isPrimary ? "Primary symbol — drives Strategy Builder" : `Make ${sym} primary`}
+                    className={cn(!isPrimary && "cursor-pointer hover:underline")}
+                  >
+                    {sym}
+                  </span>
+                  {removable && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Remove ${sym}`}
+                      title={`Remove ${sym}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        applyAndFollow(() => toggleSymbol(sym));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        applyAndFollow(() => toggleSymbol(sym));
+                      }}
+                      className="inline-flex size-4 items-center justify-center rounded-full text-sidebar-foreground/60 hover:bg-black/40 hover:text-sidebar-foreground"
+                    >
+                      <X className="size-3" />
+                    </span>
+                  )}
                 </span>
               );
             })}
-            {symbols.length > 3 && (
-              <span className="text-xs opacity-70">+{symbols.length - 3}</span>
-            )}
           </span>
           <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
         </Button>

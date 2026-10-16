@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 
 /**
  * Structure / legs / net credit-debit / max profit-loss / breakeven / POP
- * card -- shared by Strategy Builder's "Recommended Trade" and Backtest's
+ * card -- used by Strategy Builder's "Recommended Trade".
  * "Entry Trade", so both render identically instead of drifting apart.
  */
 export function TradeCard({ candidate }: { candidate: StrategyCandidate }) {
