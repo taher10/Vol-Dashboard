@@ -174,23 +174,34 @@ _PRICE_COLUMNS = {
 }
 
 
+def resolve_db_path(db_path: Path | str | None = None) -> Path:
+    """Where the chain database lives, without opening it.
+
+    Callers that only need the path -- a cache fingerprint, a log line --
+    must not have to construct a SchwabDatabase, because the constructor
+    opens the file and runs DDL against it. Under CI that file is an
+    unfetched Git LFS pointer, so merely asking where it is raised
+    "file is not a database" and took the whole suite down.
+
+    SCHWAB_DB_PATH lets a local dev session write somewhere other than the
+    committed database. That file is tracked and the daily workflow commits
+    a new ~390MB version of it every night, so any local write leaves the
+    working tree dirty and blocks the next `git pull` with "local changes
+    would be overwritten". .gitignore cannot help: it only applies to
+    untracked files, and this one is tracked.
+
+    Read per call rather than captured at import, so a test or a shell that
+    sets the variable later still takes effect.
+    """
+    env_path = os.environ.get("SCHWAB_DB_PATH")
+    return Path(db_path) if db_path else Path(env_path) if env_path else _DEFAULT_DB_PATH
+
+
 class SchwabDatabase:
     """SQLite-backed accumulator for raw options-chain and stock-price data."""
 
     def __init__(self, db_path: Path | str | None = None) -> None:
-        # SCHWAB_DB_PATH lets a local dev session write somewhere other than the
-        # committed database. That file is tracked and the daily workflow
-        # commits a new ~390MB version of it every night, so any local write --
-        # clicking "Refresh Live Data", or any /api/refresh call -- leaves the
-        # working tree dirty and blocks the next `git pull` with "local changes
-        # would be overwritten". .gitignore can't help: it only applies to
-        # untracked files, and this one is tracked. Pointing local writes at a
-        # separate, ignored path is what actually stops it.
-        #
-        # Resolved per instance rather than at import so a test or a shell that
-        # sets the variable later still gets picked up.
-        env_path = os.environ.get("SCHWAB_DB_PATH")
-        self.db_path = Path(db_path) if db_path else Path(env_path) if env_path else _DEFAULT_DB_PATH
+        self.db_path = resolve_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)

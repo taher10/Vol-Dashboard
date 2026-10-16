@@ -91,18 +91,40 @@ class TestCachesAgainstTheData:
 
 
 class TestFingerprint:
-    def test_tracks_both_databases(self):
+    def test_tracks_both_databases(self, tmp_path, monkeypatch):
+        """Points at temp files rather than the committed ones. The real
+        chain database is an unfetched Git LFS pointer under CI, and the
+        first version of this test constructed a SchwabDatabase to find its
+        path -- which opens it, and failed with "file is not a database".
+        resolve_db_path exists so asking where the data lives never opens
+        it."""
+        chain = tmp_path / "chain.db"
+        history = tmp_path / "history.db"
+        chain.write_bytes(b"x")
+        history.write_bytes(b"x")
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(chain))
+        monkeypatch.setattr(routes._history_store, "db_path", history)
+
         chain_mtime, history_mtime = routes._data_fingerprint()
 
-        assert chain_mtime > 0 and history_mtime > 0
+        assert chain_mtime == chain.stat().st_mtime
+        assert history_mtime == history.stat().st_mtime
+
+    def test_does_not_open_the_database(self, tmp_path, monkeypatch):
+        """The regression, pinned: a file that is not valid SQLite -- exactly
+        what an unfetched LFS pointer is -- must still fingerprint fine."""
+        pointer = tmp_path / "chain.db"
+        pointer.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\n")
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(pointer))
+
+        assert routes._data_fingerprint()[0] == pointer.stat().st_mtime
 
     def test_missing_file_does_not_raise(self, monkeypatch, tmp_path):
         """A fresh checkout may have neither file yet. The fingerprint has to
         degrade to a constant rather than take the API down."""
         monkeypatch.setenv("SCHWAB_DB_PATH", str(tmp_path / "absent.db"))
-        routes._db_at.cache_clear()
 
-        assert routes._data_fingerprint() is not None
+        assert routes._data_fingerprint()[0] == 0.0
 
 
 class TestWrapperPreservesTheFunction:

@@ -32,7 +32,7 @@ from src.dashboard import data_trust as data_trust_report
 from src.dashboard import vol_surface
 from src.dashboard.data_loader import SnapshotBundle
 from src.history_store import HistoryStore
-from src.schwab_database import SchwabDatabase
+from src.schwab_database import SchwabDatabase, resolve_db_path
 from src.symbols import SYMBOL_REGISTRY
 
 from .demo import block_in_demo
@@ -215,7 +215,11 @@ def _data_fingerprint() -> tuple[float, float]:
         except OSError:
             return 0.0
 
-    return mtime(_db().db_path), mtime(_history_store.db_path)
+    # resolve_db_path rather than _db().db_path: the latter constructs a
+    # SchwabDatabase, which opens the file and runs DDL. Under CI that file
+    # is an unfetched LFS pointer, so asking a cache where its data lives
+    # was enough to fail the suite with "file is not a database".
+    return mtime(resolve_db_path()), mtime(_history_store.db_path)
 
 
 def _data_cached(fn):
