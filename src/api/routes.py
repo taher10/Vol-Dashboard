@@ -338,6 +338,7 @@ def scanner(target_dte: int = Query(30, ge=0, le=3650)) -> dict:
     return {"target_dte": target_dte, "rows": [_scanner_row(sym, target_dte) for sym in SYMBOL_REGISTRY]}
 
 
+@_data_cached
 def _pcr_snapshot(expiration: str | None) -> dict:
     """Put/Call open-interest ratio (total put OI / total call OI, summed
     across every strike at one expiration) for every symbol that literally

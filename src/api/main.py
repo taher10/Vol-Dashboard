@@ -23,11 +23,26 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import chat
+from contextlib import asynccontextmanager
+
+from . import chat, warmup
 from .demo import demo_mode
 from .routes import router
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Warm the row caches in the background, when WARM_CACHE is set.
+
+    Startup must not wait on it: Render's health check has to pass promptly
+    or the deploy is rejected, and a slow warm should never be the reason a
+    deployment fails. See src/api/warmup.py.
+    """
+    warmup.start_background_warm()
+    yield
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Vol Dashboard API",
     description="Read-only options-volatility data API backing the web dashboard.",
     version="0.1.0",

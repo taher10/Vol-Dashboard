@@ -51,6 +51,14 @@ services:
         value: "3.13"
       - key: DEMO_MODE
         value: "1"
+      # Fills the row caches in a background thread at startup. The free
+      # instance sleeps after 15 minutes, so every visit after a quiet spell
+      # starts a fresh process with empty caches -- ~18s for the first Vol
+      # Scanner request on this CPU. Render already spends ~50s waking the
+      # container; warming alongside that costs the visitor nothing and
+      # finishes first. Off everywhere else: see src/api/warmup.py.
+      - key: WARM_CACHE
+        value: "1"
       # The Vercel domain serving the frontend. CORS only constrains
       # browsers -- it is not what keeps this deployment safe (see above) --
       # but leaving it open would let any page script-read the API through a
