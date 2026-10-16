@@ -47,3 +47,10 @@ env/
 database/local*.db
 database/*.local.db
 demo-data/
+
+# Backups written by src/backfill_session_dates.py --apply. ~410MB each and
+# NOT LFS-tracked (the filter matches the exact database paths, not these),
+# so an accidental `git add` would put 410MB of binary into git proper --
+# painful to undo. They are your undo for the relabelling; delete them once
+# the result is verified and pushed.
+*.pre-backfill
