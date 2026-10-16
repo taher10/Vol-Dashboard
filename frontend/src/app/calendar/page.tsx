@@ -271,8 +271,8 @@ export default function CalendarMathPage() {
         >
           <p className="mb-2">
             The ranking is a MODELED estimate -- a forward-variance decomposition using each leg&apos;s real
-            recorded IV and broker-supplied vega. It is not a guarantee and not a backtested win rate. For a real
-            (if short) track record of an actual trade, run it on the Backtest page.
+            recorded IV and broker-supplied vega. It is not a guarantee and not a backtested win rate --
+            this dashboard does not backtest, so treat it as a structural-edge estimate, not evidence.
           </p>
           <p className="mb-2">
             <span className="text-foreground">Net debit</span> is the real capital required.{" "}

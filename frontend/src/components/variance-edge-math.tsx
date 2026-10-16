@@ -216,8 +216,8 @@ export function VarianceEdgeMath({ example }: { example?: CalendarEdgeRow | null
                 wrong about direction can still lose.
               </li>
               <li>
-                It is an estimate of structural edge, not a backtested win rate. The Backtest page is where an
-                actual trade gets a track record.
+                It is an estimate of structural edge, not a backtested win rate. Nothing here has been
+                tested against what actually happened.
               </li>
             </ul>
           </div>

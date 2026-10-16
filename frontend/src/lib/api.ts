@@ -455,106 +455,19 @@ export interface TradeIdeasResponse {
   ideas: TradeIdea[];
 }
 
-// ---------------------------------------------------------------------------
-// Backtest (historical trade simulator)
-// ---------------------------------------------------------------------------
-
-export interface BacktestExpirationsResponse {
-  symbol: string;
-  entry_date: string;
-  expirations: ExpiryOption[];
-}
-
-export interface EquityPoint {
-  date: string;
-  dte_remaining: number;
-  pnl_per_share: number;
-  underlying_price: number | null;
-}
-
-export interface BacktestResult {
-  entry_date: string;
-  entry_candidate: StrategyCandidate;
-  equity_curve: EquityPoint[];
-  status: "open" | "closed";
-  final_pnl_per_share: number;
-  days_held: number;
-  summary: string;
-}
-
-export type BacktestStructure =
-  | "bull_call"
-  | "bull_put"
-  | "bear_call"
-  | "bear_put"
-  | "cash_secured_put"
-  | "covered_call"
-  | "calendar_call";
-
-/** Every structure backtestable end to end, in the order shown in pickers --
- * verticals first (grouped bullish/bearish), then the two single-leg
- * structures, then the calendar. Shared by the primary and comparison-mode
- * pickers. */
-export const BACKTEST_STRUCTURES: { value: BacktestStructure; label: string }[] = [
-  { value: "bull_call", label: "Bull Call Spread" },
-  { value: "bull_put", label: "Bull Put Spread" },
-  { value: "bear_call", label: "Bear Call Spread" },
-  { value: "bear_put", label: "Bear Put Spread" },
-  { value: "cash_secured_put", label: "Cash Secured Put" },
-  { value: "covered_call", label: "Covered Call" },
-  { value: "calendar_call", label: "Calendar Call Spread" },
-];
-
-/** Verticals take a width (# strikes between the two legs); the single-leg
- * structures and the calendar (which has its own back-month expiration
- * control instead) don't. */
-export function structureHasWidth(structure: BacktestStructure): boolean {
-  return structure !== "cash_secured_put" && structure !== "covered_call" && structure !== "calendar_call";
-}
-
-/** The calendar is the only structure whose two legs expire on different
- * dates -- it needs its own back-month expiration picker instead of the
- * width control every other structure uses. */
-export function structureIsCalendar(structure: BacktestStructure): boolean {
-  return structure === "calendar_call";
-}
-
-export interface BacktestRunResponse {
-  symbol: string;
-  entry_date: string;
-  expiration: string;
-  structure: BacktestStructure;
-  target_delta: number;
-  width_strikes: number;
-  back_expiration: string | null;
-  result: BacktestResult | null;
-  /** Set (with `result: null`) when no such structure could be built for this date/expiration/delta/width combination. */
-  error: string | null;
-}
-
-export interface BacktestRunParams {
-  entryDate: string;
-  expiration: string;
-  structure: BacktestStructure;
-  targetDelta: number;
-  widthStrikes: number;
-  /** Required when structure is calendar_call, ignored otherwise. */
-  backExpiration?: string;
-}
-
 /** `demo_mode` is true on the shared deployment, where the credential-backed
  * routes (/api/refresh, /api/chat) are removed. See src/api/demo.py. */
+export interface HealthResponse {
+  status: string;
+  demo_mode: boolean;
+}
+
 export interface SyncResponse {
   changed: boolean;
   message: string;
   before: string | null;
   after: string | null;
   seconds: number | null;
-}
-
-export interface HealthResponse {
-  status: string;
-  demo_mode: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -601,21 +514,8 @@ export const api = {
 
   refresh: (symbols: string[]) => apiPost<RefreshResponse>("/api/refresh", { symbols: symbols.join(",") }),
 
-  backtestDates: (symbol: string) =>
-    apiGet<{ symbol: string; dates: string[] }>(`/api/history/${symbol}/options-snapshot-dates`),
 
-  backtestExpirations: (symbol: string, entryDate: string) =>
-    apiGet<BacktestExpirationsResponse>(`/api/backtest/${symbol}/expirations`, { entry_date: entryDate }),
 
-  runBacktest: (symbol: string, params: BacktestRunParams) =>
-    apiGet<BacktestRunResponse>(`/api/backtest/${symbol}/run`, {
-      entry_date: params.entryDate,
-      expiration: params.expiration,
-      structure: params.structure,
-      target_delta: params.targetDelta,
-      width_strikes: params.widthStrikes,
-      back_expiration: params.backExpiration,
-    }),
 
   scanner: (targetDte = 30) => apiGet<ScannerResponse>("/api/scanner", { target_dte: targetDte }),
 

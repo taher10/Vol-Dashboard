@@ -163,11 +163,41 @@ export default function TradeIdeasPage() {
     return rows;
   }, [data, directionFilter, structureFilter, sortKey]);
 
+  // What the page is actually showing, stated plainly. The old summary was
+  // a muted one-liner in 12px grey -- a reader had to infer from eight
+  // separate per-card pills whether today was a rich tape or a cheap one,
+  // which is the single most useful thing to know before reading any of
+  // them. Counted off the filtered set so it tracks the toggles.
+  const mix = useMemo(() => {
+    const counts = { rich: 0, neutral: 0, cheap: 0 };
+    for (const idea of filteredSorted) counts[richnessKey(idea.richness_label)] += 1;
+    return counts;
+  }, [filteredSorted]);
+
   return (
     <>
       <SiteHeader title="Trade Ideas" />
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
-        <PageIntro summary={<>The 8 symbols with the strongest richness signal today.</>}>
+        <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h2 className="text-lg font-semibold tracking-tight text-foreground">
+            {filteredSorted.length} {filteredSorted.length === 1 ? "idea" : "ideas"} today
+          </h2>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(["rich", "neutral", "cheap"] as const).map((k) =>
+              mix[k] > 0 ? (
+                <span
+                  key={k}
+                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-sm font-semibold"
+                  style={{ backgroundColor: RICHNESS_BG[k], color: RICHNESS_TEXT[k] }}
+                >
+                  {mix[k]} <span className="font-medium capitalize">{k}</span>
+                </span>
+              ) : null
+            )}
+          </div>
+        </div>
+
+        <PageIntro summary={<>Ranked by how far each symbol's premium sits from its own history.</>}>
           <p>The 8 symbols with the strongest richness signal today, ranked -- same math Strategy Builder uses, not a
           separate estimate. Symbols with a balanced smile (no clear edge) never appear here. Credit spreads (selling
           premium) only show up when IV reads Rich or Neutral; on a day where IV is cheap across most of the tracked
