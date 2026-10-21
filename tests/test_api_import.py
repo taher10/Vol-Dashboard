@@ -23,7 +23,6 @@ require one to exist. These tests pin that.
 """
 
 import importlib
-import sys
 
 import pytest
 
@@ -35,13 +34,16 @@ _LFS_POINTER = (
 
 
 @pytest.fixture
-def unfetched_lfs_db(tmp_path, monkeypatch):
-    """Point the app at a file shaped exactly like CI's unfetched pointer."""
+def unfetched_lfs_db(tmp_path, monkeypatch, reimported_src):
+    """Point the app at a file shaped exactly like CI's unfetched pointer.
+
+    reimported_src both clears `src.*` so the import below is real and puts
+    sys.modules back exactly afterwards; see its docstring for why the
+    obvious monkeypatch.delitem loop is not safe here.
+    """
     pointer = tmp_path / "schwab_database.db"
     pointer.write_text(_LFS_POINTER)
     monkeypatch.setenv("SCHWAB_DB_PATH", str(pointer))
-    for name in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
-        monkeypatch.delitem(sys.modules, name, raising=False)
     return pointer
 
 
