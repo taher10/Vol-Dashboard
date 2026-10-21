@@ -27,7 +27,16 @@ from fastapi import APIRouter, HTTPException, Query
 
 from src import data_quality
 from src.data_quality import LiveDataUnavailableError
-from src.dashboard import backtest_engine, data_loader, data_sync, decision_engine, insights, strategy_engine
+from src.dashboard import (
+    backtest_engine,
+    data_loader,
+    data_sync,
+    decision_engine,
+    earnings,
+    event_vol,
+    insights,
+    strategy_engine,
+)
 from src.dashboard import data_trust as data_trust_report
 from src.dashboard import vol_surface
 from src.dashboard.data_loader import SnapshotBundle
@@ -1174,6 +1183,26 @@ def _trade_idea(symbol: str) -> dict | None:
 
     reward_risk = clean_value(trade.max_profit / trade.max_loss) if trade.max_loss > 0 else None
 
+    # Does an earnings announcement land before this trade expires, and how
+    # much of the premium is the market charging for it? Richness ranking is
+    # dominated by pre-earnings names -- implied vol rises before a binary
+    # event because the event is real -- so without this the page reads as
+    # eight independent opportunities when it is often one pattern eight
+    # times. See src/dashboard/earnings.py and event_vol.py.
+    today = date.today()
+    announcement = earnings.next_earnings(symbol, today)
+    expiry = pd.Timestamp(trade.expiration).date()
+    event = None
+    if announcement is not None and announcement <= expiry:
+        move = event_vol.implied_event_move(bundle.chain, _live_dte, announcement, today)
+        event = {
+            "date": announcement.isoformat(),
+            "days_away": (announcement - today).days,
+            "implied_move_pct": clean_value(move.implied_move_pct) if move else None,
+            "before_dte": move.before_dte if move else None,
+            "after_dte": move.after_dte if move else None,
+        }
+
     return {
         # structure/direction/expiration/dte/legs/net_debit_credit/max_profit/
         # max_loss/breakevens/approx_pop/payoff all come from here -- same
@@ -1195,6 +1224,11 @@ def _trade_idea(symbol: str) -> dict | None:
         "skew_bias": clean_value(notable_row["skew_bias"]),
         "skew": clean_value(notable_row["skew"]),
         "has_wing_data": bool(notable_row["has_wing_data"]),
+        # None when no announcement falls before expiry. `calendar_known`
+        # separates "nothing due" from "nothing on file" -- the calendar is
+        # hand-kept, and an empty entry must not read as an all-clear.
+        "event": event,
+        "calendar_known": earnings.has_calendar(symbol),
     }
 
 
