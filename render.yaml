@@ -15,10 +15,17 @@
 # The database
 # ------------
 # The demo serves a frozen snapshot built by `python -m src.build_demo_db`.
-# It is NOT in the repo: the live chain database is ~260MB in Git LFS, and
-# pulling LFS on every deploy would spend a quarter of the free monthly
-# bandwidth each time. Upload the trimmed file as a GitHub Release asset and
-# set DEMO_DB_URL to it -- see the build command below and DEPLOYING.md.
+# It is NOT in the repo: the live chain database is ~450MB in Git LFS, and
+# pulling that on every deploy would be slow and pointless when the demo
+# only needs five days of it.
+#
+# .github/workflows/publish-demo.yml republishes it weekly to a release with
+# the FIXED tag `demo-latest`, so this URL never changes and DEMO_DB_URL is
+# set once:
+#
+#   https://github.com/taher10/Vol-Dashboard/releases/download/demo-latest/schwab_database.db
+#
+# See DEPLOYING.md.
 
 services:
   - type: web

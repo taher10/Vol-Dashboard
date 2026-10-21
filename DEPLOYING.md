@@ -127,9 +127,55 @@ with nothing set you get the full local behaviour, chat and refresh included.
 
 ## Refreshing the demo's data
 
-Rebuild, re-upload as a new Release asset, update `DEMO_DB_URL`, redeploy.
-There is deliberately no automation: the demo is a snapshot you choose to
-publish, not a live mirror of an account's market-data entitlement.
+Automated: `.github/workflows/publish-demo.yml` rebuilds the snapshot and
+republishes it every Sunday at 07:00 UTC. Run it on demand from the Actions
+tab ("Publish demo snapshot" -> Run workflow) whenever you want the demo
+current before showing it to someone.
+
+**The download URL never changes.** Every run replaces the asset on one
+release with the fixed tag `demo-latest`, so `DEMO_DB_URL` is set once and
+never edited again:
+
+```
+https://github.com/taher10/Vol-Dashboard/releases/download/demo-latest/schwab_database.db
+```
+
+That is the point of the fixed tag. Dated tags read better in the Releases
+list but require editing Render on every publish, and forgetting that step
+is exactly how the demo spent days serving a snapshot Render was still
+dutifully downloading from an old URL.
+
+### One secret to add
+
+| Secret | Where to get it |
+|---|---|
+| `RENDER_DEPLOY_HOOK` | Render -> the service -> Settings -> Deploy Hook -> copy the URL |
+
+Add it under the repo's Settings -> Secrets and variables -> Actions.
+Without it the snapshot still publishes; only the automatic redeploy is
+skipped, and Render picks the new file up on its next deploy anyway.
+
+### What stops a bad snapshot going out
+
+The job refuses to publish when the build looks wrong -- fewer than two
+days, a newest day with under 20 symbols (a partial collection), or no
+precomputed metrics (which would leave the demo taking minutes per page).
+Leaving the demo on last week's good snapshot beats replacing it with a
+broken one.
+
+Two runs cannot overlap: a `concurrency` group prevents them deleting each
+other's asset mid-upload, which would leave `demo-latest` with no file and
+break Render's next build.
+
+### Doing it by hand
+
+Still works, and is what to use if you want a dated tag kept for the record:
+
+```bash
+git pull && python -m src.build_demo_db --days 5
+```
+
+Then upload as a Release and point `DEMO_DB_URL` at it.
 
 ## Before making it genuinely public
 
