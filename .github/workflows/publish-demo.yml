@@ -1,0 +1,130 @@
+name: Publish demo snapshot
+
+# Rebuilds the public demo's database from the collected data and republishes
+# it, so the demo stops drifting a day further behind every weekday.
+#
+# The manual version of this was four steps -- build, upload a Release,
+# change DEMO_DB_URL on Render, redeploy -- and the third was the one that
+# got forgotten, leaving the demo serving a snapshot Render was still
+# faithfully downloading from last week's URL.
+#
+# A fixed tag removes that step entirely. Every run replaces the asset on
+# ONE release (`demo-latest`), so the download URL never changes and
+# DEMO_DB_URL is set once and never touched again. The alternative -- a
+# dated tag per run -- is tidier to read in the Releases list and requires
+# editing Render every single time, which is exactly the failure this is
+# meant to prevent.
+#
+# Weekly rather than daily. The demo is a snapshot you choose to publish,
+# not a live mirror of a personal Schwab data entitlement, and a weekly
+# cadence keeps that a deliberate act. Market data from a personal
+# developer app is worth a thought before it updates on a timer -- see
+# DEPLOYING.md.
+#
+# Requires one repo secret:
+#   RENDER_DEPLOY_HOOK   Render -> the service -> Settings -> Deploy Hook.
+#                        Without it the asset still publishes; only the
+#                        redeploy is skipped, and Render picks the new file
+#                        up on its next deploy anyway.
+
+on:
+  schedule:
+    # 07:00 UTC Sunday -- well clear of the weekday collection window, and
+    # after Friday's session has been collected and committed.
+    - cron: "0 7 * * 0"
+  workflow_dispatch: {} # "Run workflow" in the Actions tab, for an ad-hoc refresh
+
+permissions:
+  contents: write # creating/updating the release and its asset
+
+concurrency:
+  # Two of these racing would have them deleting each other's asset
+  # mid-upload, and the loser leaves `demo-latest` with no file attached --
+  # which breaks Render's next build, since it curls that exact URL.
+  group: publish-demo
+  cancel-in-progress: false
+
+env:
+  TAG: demo-latest
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      # lfs: true is required: the chain database this builds from is
+      # LFS-tracked, and without it the checkout leaves a ~130-byte pointer
+      # that SQLite rejects with "file is not a database".
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build the demo snapshot
+        run: python -m src.build_demo_db --days 5
+
+      # Fail here rather than publish something broken. build_demo_db skips
+      # partial days, so an empty or metric-less build means the source data
+      # is wrong -- better to leave the demo on last week's good snapshot
+      # than replace it with a bad one.
+      - name: Verify what was built
+        run: |
+          python - <<'PY'
+          import sqlite3, sys
+          db = "demo-data/schwab_database.db"
+          c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+          days = c.execute("SELECT COUNT(DISTINCT snapshot_date) FROM options").fetchone()[0]
+          newest, symbols = c.execute(
+              "SELECT snapshot_date, COUNT(DISTINCT symbol) FROM options "
+              "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM options)"
+          ).fetchone()
+          frames = c.execute("SELECT COUNT(*) FROM precomputed_metrics").fetchone()[0]
+          print(f"{days} days, newest {newest} with {symbols} symbols, {frames} precomputed frames")
+          problems = []
+          if days < 2: problems.append(f"only {days} day(s)")
+          if symbols < 20: problems.append(f"newest day has only {symbols} symbols")
+          if frames == 0: problems.append("no precomputed metrics -- the demo would be unusably slow")
+          if problems:
+              sys.exit("Refusing to publish: " + "; ".join(problems))
+          PY
+
+      - name: Publish to the fixed release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NEWEST=$(python -c "import sqlite3;print(sqlite3.connect('file:demo-data/schwab_database.db?mode=ro',uri=True).execute('SELECT MAX(snapshot_date) FROM options').fetchone()[0])")
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Demo snapshot (latest)" \
+              --notes "Rolling snapshot for the public demo. Replaced automatically; the download URL is stable so Render's DEMO_DB_URL never needs changing." \
+              --prerelease
+          fi
+
+          # --clobber replaces the existing asset in place, which keeps the
+          # URL identical. Deleting and re-creating the release would also
+          # work but briefly leaves the URL 404ing, and Render could deploy
+          # into that window.
+          gh release upload "$TAG" demo-data/schwab_database.db --clobber
+          gh release edit "$TAG" --notes "Rolling snapshot for the public demo — market session $NEWEST, published $(date -u +%Y-%m-%dT%H:%MZ).
+
+          Replaced automatically by .github/workflows/publish-demo.yml. The download URL is stable, so Render's DEMO_DB_URL never needs changing."
+          echo "published session $NEWEST to $TAG"
+
+      - name: Tell Render to redeploy
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "${HOOK:-}" ]; then
+            echo "RENDER_DEPLOY_HOOK not set -- asset published, redeploy skipped."
+            echo "Render will pick up the new file on its next deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" >/dev/null
+          echo "Render redeploy triggered."
