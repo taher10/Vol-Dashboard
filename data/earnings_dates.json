@@ -1,0 +1,108 @@
+{
+  "_README": [
+    "Earnings announcement dates, maintained by hand.",
+    "",
+    "Format: {SYMBOL: [ISO dates]}, newest first. Include PAST dates too --",
+    "they are what a historical-move comparison would be built from later.",
+    "",
+    "A symbol with an empty list simply gets no earnings flag. That is a",
+    "known gap, not a claim that no earnings are coming, and the UI says so",
+    "rather than implying the name is clean.",
+    "",
+    "Deliberately hand-maintained: 24 symbols x 4 dates a year is a few",
+    "minutes a quarter, against a scraped feed that breaks silently and sits",
+    "in a terms-of-service grey area. Accuracy here matters more than",
+    "convenience -- a wrong date mislabels which expiry carries the event.",
+    "",
+    "Fill from any investor-relations page or earnings calendar. Use the",
+    "announcement DATE; whether it is before or after the close does not",
+    "change which expiry contains it for the weeklies this tracks."
+  ],
+  "_provenance": [
+    "Seeded 2026-10-22 from Nasdaq's published earnings-date pages",
+    "(api.nasdaq.com/api/analyst/<SYMBOL>/earnings-date, sourced from Zacks).",
+    "",
+    "THESE ARE EXPECTED DATES, NOT CONFIRMED ONES. Nasdaq's own wording is",
+    "'expected* to report'. Companies move them, sometimes by a week, and a",
+    "shifted date mislabels which expiry carries the event. Treat the flag",
+    "as a prompt to check, not as an authority, and correct from the",
+    "company's investor-relations page when it matters to a position.",
+    "",
+    "17 of 19 were corroborated against the options market at the time of",
+    "seeding: the implied-vol kink in the term structure lined up with the",
+    "claimed date (see src/dashboard/event_vol.py). The two that did not:",
+    "  AAPL  1.2% implied -- low, though AAPL genuinely has small earnings",
+    "        moves, so this may be correct rather than a wrong date.",
+    "  SPCX  no event priced at all. Worth verifying before relying on it.",
+    "",
+    "No dates available for MU, JPM, NFLX, APLD -- Nasdaq's vendor had none.",
+    "SPX is an index and has no earnings; its empty list is correct forever.",
+    "",
+    "Only NEXT dates were available from this source. Past dates still need",
+    "adding by hand before any historical-move comparison is possible."
+  ],
+  "earnings": {
+    "AAPL": [
+      "2026-11-02"
+    ],
+    "AMD": [
+      "2026-11-03"
+    ],
+    "AMZN": [
+      "2026-10-29"
+    ],
+    "APLD": [],
+    "APP": [
+      "2026-11-04"
+    ],
+    "BE": [
+      "2026-10-22"
+    ],
+    "COHR": [
+      "2026-11-04"
+    ],
+    "GOOGL": [
+      "2026-10-28"
+    ],
+    "IREN": [
+      "2026-11-05"
+    ],
+    "JPM": [],
+    "LITE": [
+      "2026-11-05"
+    ],
+    "META": [
+      "2026-10-21"
+    ],
+    "MRVL": [
+      "2026-12-01"
+    ],
+    "MSFT": [
+      "2026-10-28"
+    ],
+    "MU": [],
+    "NBIS": [
+      "2026-11-10"
+    ],
+    "NFLX": [],
+    "NVDA": [
+      "2026-11-18"
+    ],
+    "PLTR": [
+      "2026-11-02"
+    ],
+    "RKLB": [
+      "2026-11-09"
+    ],
+    "SNDK": [
+      "2026-10-29"
+    ],
+    "SPCX": [
+      "2026-11-03"
+    ],
+    "SPX": [],
+    "TSLA": [
+      "2026-10-21"
+    ]
+  }
+}

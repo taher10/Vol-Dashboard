@@ -25,6 +25,7 @@ import {
 type SortKey = "reward_risk" | "approx_pop" | "max_profit" | "dte";
 type DirectionFilter = "all" | "bullish" | "bearish";
 type StructureFilter = "all" | "credit" | "debit";
+type EarningsFilter = "all" | "exclude" | "only";
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "reward_risk", label: "Reward:Risk" },
@@ -105,6 +106,30 @@ function IdeaCard({ idea }: { idea: TradeIdea }) {
         ) : (
           <span className="text-xs text-muted-foreground">Richness: —</span>
         )}
+        {/* Why this matters more than it looks: richness ranking is dominated
+            by pre-earnings names, because implied vol rises before a binary
+            event whether or not it is mispriced. Without this the page reads
+            as several independent opportunities when it is often one pattern
+            repeated. */}
+        {idea.event && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-300"
+            title={`Earnings ${idea.event.date}. The premium here includes payment for that event.`}
+          >
+            Earnings in {idea.event.days_away}d
+            {idea.event.implied_move_pct !== null && (
+              <span className="font-normal">· implied ±{idea.event.implied_move_pct.toFixed(1)}%</span>
+            )}
+          </span>
+        )}
+        {!idea.event && !idea.calendar_known && (
+          <span
+            className="text-xs text-muted-foreground/70"
+            title="No earnings dates on file for this symbol -- a gap in the hand-maintained calendar, not a confirmation that none are due. See data/earnings_dates.json."
+          >
+            earnings: unknown
+          </span>
+        )}
       </div>
 
       <p className="text-xs text-muted-foreground">{idea.reason}</p>
@@ -125,6 +150,10 @@ export default function TradeIdeasPage() {
   const [error, setError] = useState<string | null>(null);
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>("all");
   const [structureFilter, setStructureFilter] = useState<StructureFilter>("all");
+  // Defaults to showing everything. Hiding pre-earnings ideas silently
+  // would be its own distortion -- the point is to make the pattern
+  // visible, then let it be filtered deliberately.
+  const [earningsFilter, setEarningsFilter] = useState<EarningsFilter>("all");
   const [sortKey, setSortKey] = useState<SortKey>("reward_risk");
 
   useEffect(() => {
@@ -151,6 +180,9 @@ export default function TradeIdeasPage() {
     if (structureFilter !== "all") {
       rows = rows.filter((r) => (structureFilter === "credit" ? r.is_credit : !r.is_credit));
     }
+    if (earningsFilter !== "all") {
+      rows = rows.filter((r) => (earningsFilter === "only" ? r.event !== null : r.event === null));
+    }
     rows = [...rows];
     rows.sort((a, b) => {
       const av = a[sortKey];
@@ -161,13 +193,17 @@ export default function TradeIdeasPage() {
       return bv - av;
     });
     return rows;
-  }, [data, directionFilter, structureFilter, sortKey]);
+  }, [data, directionFilter, structureFilter, earningsFilter, sortKey]);
 
   // What the page is actually showing, stated plainly. The old summary was
   // a muted one-liner in 12px grey -- a reader had to infer from eight
   // separate per-card pills whether today was a rich tape or a cheap one,
   // which is the single most useful thing to know before reading any of
   // them. Counted off the filtered set so it tracks the toggles.
+  // True when the hand-maintained calendar has no dates for any symbol on
+  // the page. Drives a specific empty state rather than the generic one.
+  const calendarEmpty = useMemo(() => data.length > 0 && data.every((i) => !i.calendar_known), [data]);
+
   const mix = useMemo(() => {
     const counts = { rich: 0, neutral: 0, cheap: 0 };
     for (const idea of filteredSorted) counts[richnessKey(idea.richness_label)] += 1;
@@ -231,6 +267,18 @@ export default function TradeIdeasPage() {
             </ToggleGroup>
           </div>
           <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">Earnings</span>
+            <ToggleGroup
+              type="single"
+              value={earningsFilter}
+              onValueChange={(v) => v && setEarningsFilter(v as EarningsFilter)}
+            >
+              <ToggleGroupItem value="all">All</ToggleGroupItem>
+              <ToggleGroupItem value="exclude">No earnings</ToggleGroupItem>
+              <ToggleGroupItem value="only">Pre-earnings</ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+          <div className="flex flex-col gap-1.5">
             <span className="text-xs text-muted-foreground">Sort by</span>
             <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
               <SelectTrigger size="sm" className="w-40">
@@ -263,9 +311,23 @@ export default function TradeIdeasPage() {
           </div>
         ) : filteredSorted.length === 0 ? (
           <div className="rounded-md border border-border bg-muted px-4 py-3 text-sm text-muted-foreground">
-            {data.length === 0
-              ? "No directional trade ideas today -- every tracked symbol's smile is currently balanced, or there's no saved data yet."
-              : "No ideas match the current filters."}
+            {data.length === 0 ? (
+              "No directional trade ideas today -- every tracked symbol's smile is currently balanced, or there's no saved data yet."
+            ) : calendarEmpty && earningsFilter !== "all" ? (
+              // The specific dead end worth naming: the earnings filters can
+              // only ever return everything or nothing while the calendar is
+              // empty, and "no ideas match the current filters" sends you
+              // looking for a bug in the filter instead of at the file.
+              <>
+                <span className="text-foreground">No earnings dates on file yet.</span> The earnings
+                filters need <code className="rounded bg-background px-1 py-0.5 text-xs">data/earnings_dates.json</code>{" "}
+                filled in — it ships empty rather than with guessed dates. Until then every idea reads
+                as &quot;earnings: unknown&quot;, so <em>Pre-earnings</em> matches nothing and{" "}
+                <em>No earnings</em> matches everything.
+              </>
+            ) : (
+              "No ideas match the current filters."
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

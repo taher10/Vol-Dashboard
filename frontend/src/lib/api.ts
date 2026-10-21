@@ -423,6 +423,20 @@ export interface PcrResponse {
 // Trade Ideas (cross-symbol actionable trade feed)
 // ---------------------------------------------------------------------------
 
+/** An earnings announcement landing before this trade expires, and how much
+ * of the premium the market is charging for it. Null when no announcement
+ * falls before expiry -- check `calendar_known` to tell that apart from
+ * "no date on file". See src/dashboard/earnings.py. */
+export interface IdeaEvent {
+  date: string;
+  days_away: number;
+  /** Implied one-off move as a % of spot, from the term structure. Null when
+   * the chain cannot support the calculation -- never a guess. */
+  implied_move_pct: number | null;
+  before_dte: number | null;
+  after_dte: number | null;
+}
+
 export interface TradeIdea {
   symbol: string;
   color: string;
@@ -446,6 +460,10 @@ export interface TradeIdea {
   richness_label: string | null;
   richness_z: number | null;
   richness_basis: "iv_history" | "vrp" | null;
+  event: IdeaEvent | null;
+  /** False means the hand-maintained calendar has no dates for this symbol,
+   * which is a gap in our knowledge -- not an all-clear. */
+  calendar_known: boolean;
   skew_bias: string | null;
   skew: number | null;
   has_wing_data: boolean;
