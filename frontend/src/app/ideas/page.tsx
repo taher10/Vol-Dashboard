@@ -200,6 +200,10 @@ export default function TradeIdeasPage() {
   // separate per-card pills whether today was a rich tape or a cheap one,
   // which is the single most useful thing to know before reading any of
   // them. Counted off the filtered set so it tracks the toggles.
+  // True when the hand-maintained calendar has no dates for any symbol on
+  // the page. Drives a specific empty state rather than the generic one.
+  const calendarEmpty = useMemo(() => data.length > 0 && data.every((i) => !i.calendar_known), [data]);
+
   const mix = useMemo(() => {
     const counts = { rich: 0, neutral: 0, cheap: 0 };
     for (const idea of filteredSorted) counts[richnessKey(idea.richness_label)] += 1;
@@ -307,9 +311,23 @@ export default function TradeIdeasPage() {
           </div>
         ) : filteredSorted.length === 0 ? (
           <div className="rounded-md border border-border bg-muted px-4 py-3 text-sm text-muted-foreground">
-            {data.length === 0
-              ? "No directional trade ideas today -- every tracked symbol's smile is currently balanced, or there's no saved data yet."
-              : "No ideas match the current filters."}
+            {data.length === 0 ? (
+              "No directional trade ideas today -- every tracked symbol's smile is currently balanced, or there's no saved data yet."
+            ) : calendarEmpty && earningsFilter !== "all" ? (
+              // The specific dead end worth naming: the earnings filters can
+              // only ever return everything or nothing while the calendar is
+              // empty, and "no ideas match the current filters" sends you
+              // looking for a bug in the filter instead of at the file.
+              <>
+                <span className="text-foreground">No earnings dates on file yet.</span> The earnings
+                filters need <code className="rounded bg-background px-1 py-0.5 text-xs">data/earnings_dates.json</code>{" "}
+                filled in — it ships empty rather than with guessed dates. Until then every idea reads
+                as &quot;earnings: unknown&quot;, so <em>Pre-earnings</em> matches nothing and{" "}
+                <em>No earnings</em> matches everything.
+              </>
+            ) : (
+              "No ideas match the current filters."
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
