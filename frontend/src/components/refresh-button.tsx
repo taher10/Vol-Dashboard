@@ -1,15 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { api, ApiError } from "@/lib/api";
-import { useSettingsStore } from "@/lib/store";
 import { useDemoMode } from "@/lib/use-demo-mode";
+import { useSync } from "@/lib/use-sync";
+import { useUpstreamStatus } from "@/lib/use-upstream-status";
 import { cn } from "@/lib/utils";
-
-type Status = { type: "success" | "info" | "error"; message: string } | null;
 
 /** Pulls the data the daily pipeline has already collected.
  *
@@ -22,45 +19,31 @@ type Status = { type: "success" | "info" | "error"; message: string } | null;
  * raw OAuth error for an operation that should not have been offered.
  *
  * What a user means by "refresh" here is "show me the latest collected
- * data", which is a git pull. See src/dashboard/data_sync.py. */
+ * data", which is a git pull. See src/dashboard/data_sync.py.
+ *
+ * Carries a count when something is waiting. The button was always
+ * available and never indicated whether pressing it would do anything, so
+ * the honest reasons to press it -- new data exists -- looked the same as
+ * the pointless ones. UpstreamBanner makes the loud version of this point;
+ * the badge is for when that has been dismissed.
+ */
 export function RefreshButton() {
   // Gated here rather than at the two call sites (site-header and
   // app-sidebar): one of them would eventually be missed, and a third
   // mount added later would be unguarded by default.
   const demo = useDemoMode();
-  const bumpRefreshNonce = useSettingsStore((s) => s.bumpRefreshNonce);
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState<Status>(null);
-
-  useEffect(() => {
-    if (!status) return;
-    const t = setTimeout(() => setStatus(null), 6000);
-    return () => clearTimeout(t);
-  }, [status]);
+  const { sync, loading, status } = useSync();
+  const { status: upstream, recheck } = useUpstreamStatus();
 
   // Hidden until health confirms this is not the demo -- see useDemoMode
   // for why unknown is treated as hidden.
   if (demo !== false) return null;
 
+  const waiting = upstream?.has_updates ? upstream.behind : null;
+
   const handleClick = async () => {
-    setLoading(true);
-    setStatus(null);
-    try {
-      const res = await api.sync();
-      setStatus({ type: res.changed ? "success" : "info", message: res.message });
-      if (res.changed) {
-        // Chain and metrics both come from the files just replaced, so every
-        // open page is now showing superseded numbers.
-        bumpRefreshNonce();
-      }
-    } catch (err) {
-      setStatus({
-        type: "error",
-        message: err instanceof ApiError ? err.message : "Sync failed — is the backend running?",
-      });
-    } finally {
-      setLoading(false);
-    }
+    const res = await sync();
+    if (res?.changed) recheck();
   };
 
   return (
@@ -68,12 +51,20 @@ export function RefreshButton() {
       <Button
         variant="outline"
         size="sm"
-        className="w-full justify-center gap-1.5 border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
+        className={cn(
+          "w-full justify-center gap-1.5 border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
+          upstream?.has_updates && "border-sky-500/50 bg-sky-500/10"
+        )}
         onClick={handleClick}
         disabled={loading}
       >
         <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
         {loading ? "Syncing…" : "Sync Latest Data"}
+        {!loading && upstream?.has_updates && (
+          <span className="ml-0.5 rounded-full bg-sky-500/25 px-1.5 py-px text-[10px] font-semibold tabular-nums text-sky-100">
+            {waiting ?? "new"}
+          </span>
+        )}
       </Button>
       {status && (
         <p

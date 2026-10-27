@@ -7,6 +7,7 @@ import { ChatPanel } from "@/components/chat-panel";
 import { DisclaimerBanner } from "@/components/disclaimer-banner";
 import { CommandPalette } from "@/components/command-palette";
 import { SymbolRouteSync } from "@/components/symbol-route-sync";
+import { UpstreamBanner } from "@/components/upstream-banner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const geistSans = Geist({
@@ -47,6 +48,10 @@ export default function RootLayout({
             {/* Above everything, on every page: a visitor can land on any
                 route from a shared link, so this cannot live on one page. */}
             <DisclaimerBanner />
+            {/* Below the disclaimer, above the content: this is about the
+                data every page is rendering, so it cannot live on one of
+                them. Renders nothing unless there is actually data waiting. */}
+            <UpstreamBanner />
             <div className="flex min-w-0 flex-1 overflow-hidden">
               <AppSidebar />
               <div className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</div>

@@ -178,3 +178,57 @@ class TestDemoNeedsNoCredentialedLibraries:
         assert client.get("/api/health").json()["demo_mode"] is True
         assert client.get("/api/symbols").status_code == 200
         assert client.post("/api/refresh?symbols=SPX").status_code == 404
+
+
+class TestSyncRoutesAreGated:
+    """The demo serves a frozen snapshot downloaded at build time.
+
+    There is no git repository behind it and no origin to consult, so both
+    sync routes would fail there -- /api/sync with a git error, and the
+    status check by shelling out to ls-remote on every page load of a public
+    site. Neither is a credential leak, which is why these sit apart from
+    the refresh/chat gate, but both are nonsense on that deployment and the
+    banner is hidden there anyway.
+    """
+
+    def test_sync_is_gone_in_demo_mode(self, client, monkeypatch):
+        monkeypatch.setenv("DEMO_MODE", "1")
+
+        assert client.post("/api/sync").status_code == 404
+
+    def test_sync_status_is_gone_in_demo_mode(self, client, monkeypatch):
+        monkeypatch.setenv("DEMO_MODE", "1")
+
+        assert client.get("/api/sync/status").status_code == 404
+
+    def test_sync_status_does_not_shell_out_in_demo_mode(self, client, monkeypatch):
+        """The gate has to stop the work, not just the response.
+
+        A 404 returned after the subprocess had already run would still have
+        every public page load spawning git against a repository that is not
+        there.
+        """
+        import src.dashboard.data_sync as data_sync
+
+        def boom(*args, **kwargs):
+            raise AssertionError("demo mode must not consult git")
+
+        monkeypatch.setattr(data_sync, "upstream_status", boom)
+        monkeypatch.setenv("DEMO_MODE", "1")
+
+        assert client.get("/api/sync/status").status_code == 404
+
+    def test_sync_status_is_reachable_when_flag_is_off(self, client, monkeypatch):
+        import src.dashboard.data_sync as data_sync
+
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        monkeypatch.setattr(
+            data_sync,
+            "upstream_status",
+            lambda **_: data_sync.UpstreamStatus(has_updates=False, behind=0, dirty=[]),
+        )
+
+        resp = client.get("/api/sync/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["has_updates"] is False
