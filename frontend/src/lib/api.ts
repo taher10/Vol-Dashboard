@@ -488,6 +488,17 @@ export interface SyncResponse {
   seconds: number | null;
 }
 
+export interface UpstreamStatusResponse {
+  /** Whether origin has collected data this checkout has not pulled. */
+  has_updates: boolean;
+  /** Commits behind, or null when that needs objects we have not fetched. */
+  behind: number | null;
+  /** Tracked data files whose local changes would block the pull. */
+  dirty: string[];
+  /** Why the check could not run — offline, no remote. Not an error to show. */
+  reason: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
@@ -529,6 +540,10 @@ export const api = {
    * see src/dashboard/data_sync.py for why a live pull is the wrong
    * operation now that the dashboard reads the committed database. */
   sync: () => apiPost<SyncResponse>("/api/sync", {}),
+
+  /** Whether there is anything to sync. Read-only and cheap — see
+   * data_sync.upstream_status for why it is ls-remote and not a fetch. */
+  syncStatus: () => apiGet<UpstreamStatusResponse>("/api/sync/status"),
 
   refresh: (symbols: string[]) => apiPost<RefreshResponse>("/api/refresh", { symbols: symbols.join(",") }),
 

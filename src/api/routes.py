@@ -1306,6 +1306,29 @@ def metric_series(
 # ---------------------------------------------------------------------------
 
 
+@router.get("/sync/status")
+def sync_status() -> dict:
+    """Whether origin has collected data this checkout has not pulled.
+
+    Exists because the dashboard reads a file while the pipeline writes a
+    commit, and nothing on screen bridged the two: a stale page looks
+    identical whether collection failed or whether it succeeded and nobody
+    pulled. Only the first is a problem, and the second is far more common.
+
+    Read-only -- see data_sync.upstream_status for why this is ls-remote and
+    not a fetch. Gated in demo mode along with /api/sync: there is nothing to
+    pull there, so there is nothing to report.
+    """
+    block_in_demo("Upstream status")
+    status = data_sync.upstream_status()
+    return {
+        "has_updates": status.has_updates,
+        "behind": status.behind,
+        "dirty": status.dirty or [],
+        "reason": status.reason,
+    }
+
+
 @router.post("/sync")
 def sync() -> dict:
     """Fetch whatever the daily pipeline has already collected.
