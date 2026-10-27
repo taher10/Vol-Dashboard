@@ -4,6 +4,7 @@ import "./globals.css";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { ChatPanel } from "@/components/chat-panel";
+import { DisclaimerBanner } from "@/components/disclaimer-banner";
 import { CommandPalette } from "@/components/command-palette";
 import { SymbolRouteSync } from "@/components/symbol-route-sync";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -42,9 +43,14 @@ export default function RootLayout({
         <TooltipProvider delayDuration={150}>
           <SymbolRouteSync />
           <CommandPalette />
-          <div className="flex h-screen overflow-hidden bg-background">
-            <AppSidebar />
-            <div className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+          <div className="flex h-screen flex-col overflow-hidden bg-background">
+            {/* Above everything, on every page: a visitor can land on any
+                route from a shared link, so this cannot live on one page. */}
+            <DisclaimerBanner />
+            <div className="flex min-w-0 flex-1 overflow-hidden">
+              <AppSidebar />
+              <div className="flex min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+            </div>
           </div>
           <ChatPanel />
         </TooltipProvider>

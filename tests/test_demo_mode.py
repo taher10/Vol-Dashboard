@@ -150,7 +150,7 @@ class TestDemoNeedsNoCredentialedLibraries:
     notice until a deploy broke.
     """
 
-    def test_api_boots_without_schwab_or_anthropic(self, monkeypatch):
+    def test_api_boots_without_schwab_or_anthropic(self, monkeypatch, reimported_src):
         import builtins
         import sys
 
@@ -164,9 +164,8 @@ class TestDemoNeedsNoCredentialedLibraries:
 
         for mod in [m for m in sys.modules if m.split(".")[0] in blocked]:
             monkeypatch.delitem(sys.modules, mod, raising=False)
-        # Force a genuine re-import of the app and everything under it.
-        for mod in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
-            monkeypatch.delitem(sys.modules, mod, raising=False)
+        # reimported_src has already cleared `src.*`, so the import below is
+        # genuine, and it restores sys.modules exactly on the way out.
         monkeypatch.setattr(builtins, "__import__", guarded)
         monkeypatch.setenv("DEMO_MODE", "1")
 
