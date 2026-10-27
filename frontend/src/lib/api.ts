@@ -345,6 +345,12 @@ export interface SurfaceResponse {
   cells: SurfaceCell[];
   iv_min: number | null;
   iv_max: number | null;
+  /** Contracts withheld because their bid-ask was too wide to imply a vol. */
+  quote_filter: {
+    applied: boolean;
+    max_iv_band: number;
+    excluded_contracts: number;
+  };
   available_compare_dates: string[];
   comparison: SurfaceComparison | null;
 }
