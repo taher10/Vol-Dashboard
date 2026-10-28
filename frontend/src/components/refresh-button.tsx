@@ -33,18 +33,13 @@ export function RefreshButton() {
   // mount added later would be unguarded by default.
   const demo = useDemoMode();
   const { sync, loading, status } = useSync();
-  const { status: upstream, recheck } = useUpstreamStatus();
+  const { status: upstream } = useUpstreamStatus();
 
   // Hidden until health confirms this is not the demo -- see useDemoMode
   // for why unknown is treated as hidden.
   if (demo !== false) return null;
 
   const waiting = upstream?.has_updates ? upstream.behind : null;
-
-  const handleClick = async () => {
-    const res = await sync();
-    if (res?.changed) recheck();
-  };
 
   return (
     <div className="flex flex-col gap-1.5 px-3 pb-3">
@@ -55,7 +50,7 @@ export function RefreshButton() {
           "w-full justify-center gap-1.5 border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
           upstream?.has_updates && "border-sky-500/50 bg-sky-500/10"
         )}
-        onClick={handleClick}
+        onClick={() => void sync()}
         disabled={loading}
       >
         <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />

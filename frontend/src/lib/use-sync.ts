@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { api, ApiError, type SyncResponse } from "@/lib/api";
 import { useSettingsStore } from "@/lib/store";
+import { notifyUpstreamStale } from "@/lib/use-upstream-status";
 
 export type SyncStatus = { type: "success" | "info" | "error"; message: string } | null;
 
@@ -38,6 +39,10 @@ export function useSync() {
         // open page is now showing superseded numbers.
         bumpRefreshNonce();
       }
+      // Every sync, not just a changed one: pull_latest drops the server's
+      // cached answer either way, so "already up to date" is also news to a
+      // banner that is currently claiming otherwise.
+      notifyUpstreamStale();
       return res;
     } catch (err) {
       setStatus({
