@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
  * how the Sync control came to look broken once already.
  */
 export function UpstreamBanner() {
-  const { status, recheck } = useUpstreamStatus();
+  const { status } = useUpstreamStatus();
   const { sync, loading, status: syncStatus } = useSync();
   const [dismissed, setDismissed] = useState<string | null>(null);
 
@@ -44,11 +44,6 @@ export function UpstreamBanner() {
     count === null
       ? "The pipeline has collected newer data."
       : `${count} new ${count === 1 ? "update" : "updates"} collected since your last sync.`;
-
-  const handleSync = async () => {
-    const res = await sync();
-    if (res?.changed) recheck();
-  };
 
   return (
     <div
@@ -94,7 +89,7 @@ export function UpstreamBanner() {
       {!blocked && (
         <button
           type="button"
-          onClick={handleSync}
+          onClick={() => void sync()}
           disabled={loading}
           className="shrink-0 inline-flex items-center gap-1.5 rounded border border-sky-400/40 bg-sky-500/15 px-2.5 py-1 font-medium text-sky-50 transition-colors hover:bg-sky-500/25 disabled:opacity-60"
         >

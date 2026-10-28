@@ -11,6 +11,24 @@ import { useDemoMode } from "@/lib/use-demo-mode";
  * shorter interval here would mostly re-read the same cached value. */
 const POLL_MS = 10 * 60 * 1000;
 
+/** Every mounted copy of the hook, so one sync updates all of them.
+ *
+ * The banner and the sidebar button each call useUpstreamStatus, and each
+ * call owns its own useState. Re-checking after a sync therefore updated
+ * only whichever component ran the sync: the banner would correctly vanish
+ * while the button kept a "3 waiting" badge next to it, until its own poll
+ * came round ten minutes later. Two controls disagreeing about whether
+ * there is data to fetch is worse than neither of them saying anything.
+ *
+ * A shared notification rather than a shared cache, because the server
+ * already caches the answer -- this only needs to say "ask again now".
+ */
+const subscribers = new Set<() => void>();
+
+export function notifyUpstreamStale() {
+  subscribers.forEach((refetch) => refetch());
+}
+
 /** Whether origin has data this checkout has not pulled.
  *
  * Polled rather than read once, because the case this exists for is a tab
@@ -43,11 +61,13 @@ export function useUpstreamStatus() {
     const id = setInterval(check, POLL_MS);
     const onFocus = () => check();
     window.addEventListener("focus", onFocus);
+    subscribers.add(check);
     return () => {
       clearInterval(id);
       window.removeEventListener("focus", onFocus);
+      subscribers.delete(check);
     };
   }, [demo, check]);
 
-  return { status, recheck: check };
+  return { status };
 }
