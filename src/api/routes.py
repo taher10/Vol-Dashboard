@@ -815,7 +815,17 @@ def _strike_profile_snapshot(symbol: str, expiration: str | None) -> dict:
 
 
 @router.get("/surface")
-def surface(symbol: str = Query(...), compare: str | None = Query(None)) -> dict:
+def surface(
+    symbol: str = Query(...),
+    compare: str | None = Query(None),
+    max_iv_band: float = Query(
+        vol_surface.MAX_IV_BAND_VOL_POINTS,
+        description=(
+            "Drop contracts whose bid-ask spans more than this many vol points, "
+            "where the quoted IV is not a measurement. 0 disables the filter."
+        ),
+    ),
+) -> dict:
     """IV by (dte, moneyness) for one symbol -- the raw surface the term
     structure and skew summaries are computed from.
 
@@ -833,7 +843,7 @@ def surface(symbol: str = Query(...), compare: str | None = Query(None)) -> dict
     payload = {
         "symbol": symbol,
         "as_of": bundle.as_of.isoformat(),
-        **vol_surface.build_surface(bundle.chain, spot, _live_dte),
+        **vol_surface.build_surface(bundle.chain, spot, _live_dte, max_iv_band=max_iv_band),
     }
 
     db = SchwabDatabase()
@@ -853,7 +863,9 @@ def surface(symbol: str = Query(...), compare: str | None = Query(None)) -> dict
         prior = vol_surface.normalize_stored_chain(prior_raw)
         prior_spot_values = prior["underlyingPrice"].dropna() if "underlyingPrice" in prior.columns else None
         prior_spot = float(prior_spot_values.iloc[0]) if prior_spot_values is not None and not prior_spot_values.empty else None
-        result = vol_surface.build_comparison(bundle.chain, prior, spot, prior_spot, _live_dte)
+        result = vol_surface.build_comparison(
+            bundle.chain, prior, spot, prior_spot, _live_dte, max_iv_band=max_iv_band
+        )
         payload["comparison"] = {
             "compare_date": compare,
             # The real elapsed gap, not an assumed week. The pipeline's

@@ -118,9 +118,17 @@ export default function SurfacePage() {
             their quoted IVs are dominated by intrinsic value and wide spreads, which would put a spurious step at
             the money.
           </p>
+          <p className="mb-2">
+            Quotes too wide to imply a volatility are withheld. A long-dated contract worth four cents has an
+            implied vol in the same sense that a coin flip has a trend — the number exists, it just isn&apos;t
+            measuring anything. The test is the bid-ask spread expressed in vol points (spread ÷ vega), not in
+            dollars: a 4¢ spread is nothing on a $12 at-the-money option and fatal on a 4¢ wing. Because those
+            cells are always the most extreme, they used to set the colour scale and flatten the real smirk into
+            one shade.
+          </p>
           <p>
-            Empty cells are left empty. A gap means no contract was quoted at that strike and expiry — filling it by
-            interpolation would invent a volatility the market never printed.
+            Empty cells are left empty. A gap means nothing trustworthy was quoted at that strike and expiry —
+            filling it by interpolation would invent a volatility the market never printed.
           </p>
         </PageIntro>
 
@@ -134,7 +142,15 @@ export default function SurfacePage() {
           <Skeleton className="h-96 w-full" />
         ) : data.cells.length === 0 ? (
           <div className="rounded-lg border border-border bg-card px-4 py-8 text-center text-sm text-muted-foreground">
-            No quoted contracts within ±25% of spot for {symbol}.
+            {data.quote_filter.excluded_contracts > 0 ? (
+              <>
+                No contracts within ±25% of spot for {symbol} carried a quote tight enough to imply a volatility.{" "}
+                {data.quote_filter.excluded_contracts} were withheld — absent because nothing here is readable, not
+                because nothing was listed.
+              </>
+            ) : (
+              <>No quoted contracts within ±25% of spot for {symbol}.</>
+            )}
           </div>
         ) : (
           <>
@@ -145,6 +161,14 @@ export default function SurfacePage() {
               <span>
                 {data.expirations.length} expirations · {data.cells.length} quoted cells
               </span>
+              {data.quote_filter.excluded_contracts > 0 && (
+                <span
+                  title={`Bid-ask wider than ${data.quote_filter.max_iv_band} vol points (spread \u00f7 vega), or no bid at all. Their quoted IV is not a measurement.`}
+                  className="cursor-help underline decoration-dotted underline-offset-2"
+                >
+                  {data.quote_filter.excluded_contracts} contracts withheld as unquotable
+                </span>
+              )}
               <span>Snapshot {fmtDateTime(data.as_of)}</span>
             </div>
 

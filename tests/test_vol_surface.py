@@ -196,3 +196,169 @@ class TestElapsedGapLabelling:
         as_of, compare, today = _d(2026, 9, 16), _d(2026, 9, 15), _d(2026, 9, 21)
         assert (as_of - compare).days == 1
         assert (today - compare).days == 6, "the wrong answer the route used to return"
+
+
+# ---------------------------------------------------------------------------
+# Quote quality
+# ---------------------------------------------------------------------------
+
+
+def quoted_chain(rows):
+    """rows: (expiration, strike, option_type, iv, bid, ask, vega)
+
+    Separate from chain() on purpose: the filter is skipped when the quote
+    columns are absent, so the existing tests above exercise the unfiltered
+    path and these exercise the filtered one.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "expiration": e,
+                "strikePrice": k,
+                "optionType": t,
+                "impliedVolatility": iv,
+                "bid": bid,
+                "ask": ask,
+                "vega": vega,
+            }
+            for e, k, t, iv, bid, ask, vega in rows
+        ]
+    )
+
+
+class TestQuoteQualityFilter:
+    """A four-cent contract has an implied volatility the way a coin flip
+    has a trend: the number exists, it is not measuring anything.
+
+    These were the loudest cells on the heatmap because they are always the
+    most extreme, so they set the colour scale and flattened the real smirk
+    into one shade.
+    """
+
+    def test_a_spread_wider_than_the_band_is_dropped(self):
+        """The observed GOOGL case: 21% OTM at 4 DTE, bid 0.02 / ask 0.06,
+        vega 0.004, quoted IV 89.96. The spread spans 10 vol points."""
+        df = quoted_chain([(EXP, 79.0, "PUT", 89.96, 0.02, 0.06, 0.004)])
+
+        out = vol_surface.build_surface(df, SPOT, dte_of(DTE))
+
+        assert out["cells"] == []
+        assert out["quote_filter"]["excluded_contracts"] == 1
+        assert out["quote_filter"]["applied"] is True
+
+    def test_a_high_iv_wing_with_a_tight_spread_survives(self):
+        """The filter is about whether the vol is knowable, not whether it
+        is large. Dropping genuine skew would defeat the point of a
+        surface."""
+        df = quoted_chain([(EXP, 85.0, "PUT", 80.9, 0.23, 0.25, 0.018)])
+
+        out = vol_surface.build_surface(df, SPOT, dte_of(DTE))
+
+        assert len(out["cells"]) == 1
+        assert out["cells"][0]["iv"] == pytest.approx(80.9)
+        assert out["quote_filter"]["excluded_contracts"] == 0
+
+    def test_a_zero_bid_is_dropped_however_tight_the_ask(self):
+        """Nobody is bidding, so there is no market -- only an ask, and an
+        IV from one side of a market is a guess."""
+        df = quoted_chain([(EXP, 80.0, "PUT", 95.0, 0.0, 0.01, 0.05)])
+
+        out = vol_surface.build_surface(df, SPOT, dte_of(DTE))
+
+        assert out["cells"] == []
+
+    def test_the_band_is_measured_in_vol_points_not_dollars(self):
+        """Same 0.04 spread, different vega. A plain price rule cannot tell
+        these apart, and the cheap one is the whole problem."""
+        rows = [
+            (EXP, 79.0, "PUT", 89.0, 0.02, 0.06, 0.004),  # 10 vol points
+            (EXP, 95.0, "PUT", 42.0, 1.98, 2.02, 0.300),  # 0.13 vol points
+        ]
+
+        out = vol_surface.build_surface(quoted_chain(rows), SPOT, dte_of(DTE))
+
+        assert [c["iv"] for c in out["cells"]] == [pytest.approx(42.0)]
+
+    def test_a_missing_greek_is_not_a_usable_quote(self):
+        """Paired with a sound quote deliberately. On its own this row is
+        indistinguishable from a chain that carries no greeks at all, which
+        is a data fault and is handled the opposite way -- see
+        TestQuoteFilterStaysOutOfTheWay."""
+        rows = [
+            (EXP, 80.0, "PUT", 88.0, 0.02, 0.06, float("nan")),
+            (EXP, 95.0, "PUT", 42.0, 1.98, 2.02, 0.300),
+        ]
+
+        out = vol_surface.build_surface(quoted_chain(rows), SPOT, dte_of(DTE))
+
+        assert [c["iv"] for c in out["cells"]] == [pytest.approx(42.0)]
+
+    def test_zero_vega_does_not_pass_as_an_infinitely_tight_quote(self):
+        """Dividing by zero yields inf, and inf <= band is False only if the
+        arithmetic is guarded -- worth pinning, since the failure mode is a
+        junk cell being admitted rather than an error."""
+        rows = [
+            (EXP, 80.0, "PUT", 88.0, 0.02, 0.06, 0.0),
+            (EXP, 95.0, "PUT", 42.0, 1.98, 2.02, 0.300),
+        ]
+
+        out = vol_surface.build_surface(quoted_chain(rows), SPOT, dte_of(DTE))
+
+        assert [c["iv"] for c in out["cells"]] == [pytest.approx(42.0)]
+
+
+class TestQuoteFilterStaysOutOfTheWay:
+    def test_a_chain_without_quote_columns_is_built_unfiltered(self):
+        """Some live chains arrive without greeks. The old surface is the
+        right answer there; a blank page is not."""
+        df = chain([(EXP, 90.0, "PUT", 40.0)])
+
+        out = vol_surface.build_surface(df, SPOT, dte_of(DTE))
+
+        assert len(out["cells"]) == 1
+        assert out["quote_filter"]["applied"] is False
+
+    def test_it_never_empties_a_grid_it_could_only_partly_judge(self):
+        """If every row fails, the quote data is what is broken, not the
+        market. A filter that silently deletes the whole page is worse than
+        the noise it was added to remove."""
+        df = quoted_chain(
+            [
+                (EXP, 90.0, "PUT", 40.0, 0.0, 0.0, float("nan")),
+                (EXP, 95.0, "PUT", 38.0, 0.0, 0.0, float("nan")),
+            ]
+        )
+
+        out = vol_surface.build_surface(df, SPOT, dte_of(DTE))
+
+        assert len(out["cells"]) == 2
+        assert out["quote_filter"]["applied"] is False
+        assert out["quote_filter"]["excluded_contracts"] == 0
+
+    def test_band_of_zero_disables_it(self):
+        df = quoted_chain([(EXP, 79.0, "PUT", 89.0, 0.02, 0.06, 0.004)])
+
+        out = vol_surface.build_surface(df, SPOT, dte_of(DTE), max_iv_band=0)
+
+        assert len(out["cells"]) == 1
+        assert out["quote_filter"]["applied"] is False
+
+    def test_the_threshold_is_honoured(self):
+        """Band here is exactly 4 vol points."""
+        df = quoted_chain([(EXP, 90.0, "PUT", 60.0, 0.10, 0.14, 0.01)])
+
+        assert vol_surface.build_surface(df, SPOT, dte_of(DTE), max_iv_band=3.0)["cells"] == []
+        assert len(vol_surface.build_surface(df, SPOT, dte_of(DTE), max_iv_band=5.0)["cells"]) == 1
+
+    def test_comparison_applies_the_same_filter_to_both_sides(self):
+        """Otherwise a cell could be built from a trustworthy quote on one
+        date and a four-cent one on the other, and the 'change' would be an
+        artefact of which junk happened to be listed."""
+        now = quoted_chain([(EXP, 90.0, "PUT", 45.0, 1.00, 1.04, 0.20)])
+        now["dte"] = 30
+        then = quoted_chain([(EXP, 90.0, "PUT", 95.0, 0.02, 0.06, 0.004)])
+        then["dte"] = 32
+
+        out = vol_surface.build_comparison(now, then, SPOT, SPOT, dte_of(DTE))
+
+        assert out["cells"] == []
