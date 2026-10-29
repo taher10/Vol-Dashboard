@@ -213,6 +213,47 @@ def implied_vol(log_moneyness: float, years: float, p: SurfaceParams, as_of: dat
     return max(5.0, ceiling * math.tanh(vol / ceiling))
 
 
+def vol_regime(spec: "SymbolSpec", day: date) -> float:
+    """Multiplier on a symbol's vol level for one session.
+
+    Without this the surface parameters are fixed, so implied vol barely
+    moves between sessions and every history-derived number degenerates:
+    IV rank pins to 0 or 100, percentile follows it, and the richness
+    columns rank symbols by a constant. The first build showed IV Rank 100
+    at percentile 98 for a symbol whose vol had not actually moved -- the
+    panel was working and the market was not.
+
+    Three sinusoids of different periods plus a small jitter, all keyed to
+    the date and the symbol's seed. Not a stochastic vol model: it just has
+    to wander slowly, mean-revert around its level, and be the same every
+    time it is asked.
+    """
+    t = day.toordinal()
+    phase = (spec.seed % 1000) / 1000.0 * 2.0 * math.pi
+    swing = (
+        0.16 * math.sin(2 * math.pi * t / 180.0 + phase)
+        + 0.10 * math.sin(2 * math.pi * t / 47.0 + phase * 1.7)
+        + 0.05 * math.sin(2 * math.pi * t / 11.0 + phase * 2.3)
+    )
+    jitter = (((spec.seed ^ t) * 2654435761) % 1000) / 1000.0 * 0.06 - 0.03
+    return max(0.55, 1.0 + swing + jitter)
+
+
+def regime_surface(spec: "SymbolSpec", day: date) -> SurfaceParams:
+    """The symbol's surface as of one session, with its vol level applied."""
+    base = spec.surface
+    level = vol_regime(spec, day)
+    return SurfaceParams(
+        vol_long=base.vol_long * level,
+        vol_short=base.vol_short * level,
+        term_tau=base.term_tau,
+        skew=base.skew,
+        curvature=base.curvature,
+        event_bump=base.event_bump,
+        event_date=day + timedelta(days=18) if base.event_bump else None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Quotes
 # ---------------------------------------------------------------------------
@@ -450,20 +491,11 @@ def occ_symbol(symbol: str, expiration: date, is_call: bool, strike: float) -> s
 def generate_chain(spec: SymbolSpec, as_of: date, spot: float) -> list[dict]:
     """One symbol's full chain for one session."""
     rng = random.Random(spec.seed ^ as_of.toordinal())
-    surface = spec.surface
 
-    # The event sits a few weeks out and moves with the session, so every
-    # snapshot has something in front of it rather than drifting into the
-    # past as the demo ages.
-    surface = SurfaceParams(
-        vol_long=surface.vol_long,
-        vol_short=surface.vol_short,
-        term_tau=surface.term_tau,
-        skew=surface.skew,
-        curvature=surface.curvature,
-        event_bump=surface.event_bump,
-        event_date=as_of + timedelta(days=18) if surface.event_bump else None,
-    )
+    # Carries this session's vol level, and puts the event a few weeks out
+    # so every snapshot has one in front of it rather than letting it drift
+    # into the past as the demo ages.
+    surface = regime_surface(spec, as_of)
 
     rows: list[dict] = []
     for expiration in expirations_for(as_of):
@@ -518,4 +550,68 @@ def generate_chain(spec: SymbolSpec, as_of: date, spot: float) -> list[dict]:
                         "fetch_time": f"{as_of.isoformat()}T21:05:00+00:00",
                     }
                 )
+    return rows
+
+
+# Maturities the metric history is recorded at. The real collector stores a
+# row per listed expiry; these are the ones the dashboard's history views
+# actually read back.
+HISTORY_DTES = (7, 14, 30, 45, 60, 90)
+
+
+def realized_vol(closes: list[float], window: int = 21) -> float:
+    """Annualised close-to-close vol in vol points, matching metrics.py."""
+    tail = closes[-(window + 1) :]
+    if len(tail) < 3:
+        return 0.0
+    rets = [math.log(b / a) for a, b in zip(tail, tail[1:]) if a > 0 and b > 0]
+    if len(rets) < 2:
+        return 0.0
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    return math.sqrt(var) * math.sqrt(TRADING_DAYS) * 100.0
+
+
+def generate_history(spec: SymbolSpec, path: list[tuple[date, float, float, float, float]]) -> list[dict]:
+    """One row per (session, maturity) of the metrics the dashboard tracks.
+
+    Computed from the same surface the chains come from, rather than by
+    building every historical chain and measuring it. The cheap route is
+    the point: IV rank wants a year of sessions, and generating a year of
+    full chains to derive six numbers a day would make the demo build
+    unusable for no gain in fidelity.
+
+    Skew is the 25-delta spread, using the standard approximation that a
+    25-delta strike sits about 0.674 standard deviations out. Curvature is
+    the same two wings against the money.
+    """
+    closes_by_day = [(d, c) for d, _, _, _, c in path]
+    rows: list[dict] = []
+
+    for i, (day, _spot) in enumerate(closes_by_day):
+        if i < 25:
+            continue  # not enough trailing closes for a realised-vol window
+        surface = regime_surface(spec, day)
+        rv = realized_vol([c for _, c in closes_by_day[: i + 1]])
+
+        for dte in HISTORY_DTES:
+            years = dte / 365.0
+            atm = implied_vol(0.0, years, surface, day)
+            wing = 0.674 * (atm / 100.0) * math.sqrt(years)
+            put_iv = implied_vol(-wing, years, surface, day)
+            call_iv = implied_vol(wing, years, surface, day)
+
+            rows.append(
+                {
+                    "symbol": spec.symbol,
+                    "snapshot_date": day.isoformat(),
+                    "expiration": (day + timedelta(days=dte)).isoformat(),
+                    "dte": dte,
+                    "atm_iv": round(atm, 4),
+                    "skew": round(put_iv - call_iv, 4),
+                    "curvature": round(put_iv + call_iv - 2 * atm, 4),
+                    "realized_vol": round(rv, 4),
+                    "vrp": round(atm - rv, 4),
+                }
+            )
     return rows
