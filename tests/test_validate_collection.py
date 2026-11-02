@@ -21,7 +21,13 @@ import pytest
 
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
-from src.validate_collection import _chain_consistency_problems, _depth_problems, open_chain_db, validate
+from src.validate_collection import (
+    _chain_consistency_problems,
+    _depth_problems,
+    _scheduled_session_problems,
+    open_chain_db,
+    validate,
+)
 
 MON = date(2026, 9, 7)
 FRI = date(2026, 9, 11)
@@ -248,3 +254,92 @@ class TestChainDbOpening:
         it -- coverage is the part that catches a dead pipeline."""
         store = FakeStore({"AAA": [MON, FRI], "BBB": [MON, FRI]})
         assert validate(today=FRI, store=store, symbols=symbols("AAA", "BBB"), chain_db=None) == 0
+
+
+# ---------------------------------------------------------------------------
+# Did this run collect the session it was scheduled for?
+# ---------------------------------------------------------------------------
+
+
+class _FakeChainDb:
+    """Minimal stand-in: the check only asks for each symbol's newest date."""
+
+    def __init__(self, newest):
+        self._newest = newest
+
+    def latest_options_snapshot_date(self, symbol):
+        return self._newest
+
+
+class TestScheduledSession:
+    """The 2026-10-30 incident, pinned.
+
+    Thursday's collection failed at 01:11 UTC and was re-run at 17:58. The
+    live session had moved on, so it collected Friday, reported success,
+    and left a permanent hole where Thursday should be. GitHub reports the
+    latest attempt's conclusion, so the Actions list showed a green check
+    over a missing day. Nothing else in the pipeline notices, because every
+    symbol is current and no staleness threshold is breached -- the data is
+    healthy, it is simply missing a day nobody can get back.
+    """
+
+    def test_a_later_session_than_scheduled_is_a_failure(self):
+        problems, warnings = _scheduled_session_problems(
+            _FakeChainDb(date(2026, 10, 30)), {"SPX": object()}, date(2026, 10, 29)
+        )
+
+        assert problems and not warnings
+        assert "2026-10-30" in problems[0] and "2026-10-29" in problems[0]
+
+    def test_the_scheduled_session_passes(self):
+        problems, warnings = _scheduled_session_problems(
+            _FakeChainDb(date(2026, 10, 30)), {"SPX": object()}, date(2026, 10, 30)
+        )
+
+        assert not problems and not warnings
+
+    def test_nothing_written_warns_rather_than_fails(self):
+        """Usually a market holiday. Failing here would paint roughly nine
+        runs a year red, and prolonged staleness is already covered by
+        --max-stale-days."""
+        problems, warnings = _scheduled_session_problems(
+            _FakeChainDb(date(2026, 10, 30)), {"SPX": object()}, date(2026, 11, 2)
+        )
+
+        assert warnings and not problems
+
+    def test_it_is_skipped_without_an_expected_session(self):
+        """Local runs and ad-hoc invocations pass no run timestamp."""
+        problems, warnings = _scheduled_session_problems(
+            _FakeChainDb(date(2026, 10, 30)), {"SPX": object()}, None
+        )
+
+        assert not problems and not warnings
+
+    def test_it_is_skipped_without_a_chain_database(self):
+        """Under CI the chain can be an unfetched LFS pointer. A check that
+        cannot read anything must not invent a verdict."""
+        problems, warnings = _scheduled_session_problems(
+            None, {"SPX": object()}, date(2026, 10, 29)
+        )
+
+        assert not problems and not warnings
+
+    def test_an_empty_database_warns_rather_than_failing(self):
+        problems, warnings = _scheduled_session_problems(
+            _FakeChainDb(None), {"SPX": object()}, date(2026, 10, 29)
+        )
+
+        assert warnings and not problems
+
+    def test_the_expected_session_comes_from_creation_not_execution(self):
+        """The distinction the whole check rests on. 01:11 UTC is still the
+        previous evening in New York, so that run was scheduled for the
+        29th even though it carries a UTC date of the 30th."""
+        from datetime import datetime, timezone
+
+        from src.data_quality import market_session_date
+
+        created = datetime(2026, 10, 30, 1, 11, 30, tzinfo=timezone.utc)
+
+        assert market_session_date(created) == date(2026, 10, 29)

@@ -123,8 +123,24 @@ jobs:
       # arrangement regardless of cost. Placed after the commit deliberately:
       # a validation failure should flag the problem, never discard the day's
       # data.
+      # --run-created-at carries when the run was CREATED, not when it is
+      # executing. For a first attempt those are the same moment; for a
+      # re-run they are not, and the difference is the whole check.
+      #
+      # On 2026-10-30 the Thursday collection failed at 01:11 UTC and was
+      # re-run at 17:58. By then the live session had moved on, so it
+      # collected Friday, reported success, and left a permanent hole where
+      # Thursday should be. Schwab serves current quotes only, so a late
+      # re-run cannot recover the day it was meant to cover. Nothing said
+      # so: GitHub reports the latest attempt's conclusion, so the Actions
+      # list showed a green check over a missing day.
       - name: Validate what was collected
-        run: python -m src.validate_collection --max-stale-days 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CREATED=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+          echo "run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT, created $CREATED"
+          python -m src.validate_collection --max-stale-days 3 --run-created-at "$CREATED"
 
       # Fallback alert for failures src/daily_snapshot.py's own notify() call
       # never got a chance to send -- e.g. "Restore token.json from secret"
