@@ -1,7 +1,13 @@
 name: Publish demo snapshot
 
-# Rebuilds the public demo's database from the collected data and republishes
-# it, so the demo stops drifting a day further behind every weekday.
+# Rebuilds the public demo's database and republishes it.
+#
+# The demo runs on a SIMULATED market, not on collected data. The dashboard
+# is worth showing to people and the Schwab chains it runs on are not ours
+# to publish; generating the market removes that conflict rather than
+# managing it, because there is no redistribution question about numbers
+# that came out of a random number generator. See src/synthetic_market.py
+# for the model and for how closely it tracks the real thing.
 #
 # The manual version of this was four steps -- build, upload a Release,
 # change DEMO_DB_URL on Render, redeploy -- and the third was the one that
@@ -29,8 +35,11 @@ name: Publish demo snapshot
 
 on:
   schedule:
-    # 07:00 UTC Sunday -- well clear of the weekday collection window, and
-    # after Friday's session has been collected and committed.
+    # 07:00 UTC Sunday. The old reason for a weekly cadence was that
+    # publishing real market data on a timer deserved a thought each time;
+    # that reason is gone, and this is now simply how often the demo's
+    # dates need to roll forward so it does not look abandoned. It no
+    # longer depends on the collection window at all.
     - cron: "0 7 * * 0"
   workflow_dispatch: {} # "Run workflow" in the Actions tab, for an ad-hoc refresh
 
@@ -51,12 +60,13 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     steps:
-      # lfs: true is required: the chain database this builds from is
-      # LFS-tracked, and without it the checkout leaves a ~130-byte pointer
-      # that SQLite rejects with "file is not a database".
+      # No lfs: true. This used to be mandatory, because the build read the
+      # LFS-tracked chain database and an unfetched pointer is a ~130-byte
+      # text file that SQLite rejects with "file is not a database". The
+      # generator reads nothing, so the checkout no longer pulls ~500MB of
+      # real quotes on every run -- which also takes this workflow out of
+      # the repository's 10GB monthly LFS budget.
       - uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - uses: actions/setup-python@v5
         with:
@@ -65,13 +75,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Build the demo snapshot
-        run: python -m src.build_demo_db --days 5
+      # --end defaults to today, so each run produces a market whose dates
+      # are current rather than replaying a frozen one.
+      - name: Generate the demo market
+        run: python -m src.build_synthetic_db --days 10
 
-      # Fail here rather than publish something broken. build_demo_db skips
-      # partial days, so an empty or metric-less build means the source data
-      # is wrong -- better to leave the demo on last week's good snapshot
-      # than replace it with a bad one.
+      # Fail here rather than publish something broken. The generator is
+      # deterministic, so a failure means the model or the schema changed
+      # under it -- better to leave the demo on last week's good build than
+      # replace it with a bad one.
       - name: Verify what was built
         run: |
           python - <<'PY'
@@ -84,8 +96,11 @@ jobs:
               "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM options)"
           ).fetchone()
           frames = c.execute("SELECT COUNT(*) FROM precomputed_metrics").fetchone()[0]
-          print(f"{days} days, newest {newest} with {symbols} symbols, {frames} precomputed frames")
+          h = sqlite3.connect("file:demo-data/vol_history.db?mode=ro", uri=True)
+          history = h.execute("SELECT COUNT(*) FROM metric_history").fetchone()[0]
+          print(f"{days} days, newest {newest} with {symbols} symbols, {frames} precomputed frames, {history} history rows")
           problems = []
+          if history < 1000: problems.append(f"only {history} history rows -- IV rank would be meaningless")
           if days < 2: problems.append(f"only {days} day(s)")
           if symbols < 20: problems.append(f"newest day has only {symbols} symbols")
           if frames == 0: problems.append("no precomputed metrics -- the demo would be unusably slow")
@@ -102,8 +117,8 @@ jobs:
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "Demo snapshot (latest)" \
-              --notes "Rolling snapshot for the public demo. Replaced automatically; the download URL is stable so Render's DEMO_DB_URL never needs changing." \
+              --title "Demo market (simulated, latest)" \
+              --notes "Simulated options market for the public demo. Contains no real market data. Replaced automatically; the download URL is stable so Render's DEMO_DB_URL never needs changing." \
               --prerelease
           fi
 
@@ -111,11 +126,13 @@ jobs:
           # URL identical. Deleting and re-creating the release would also
           # work but briefly leaves the URL 404ing, and Render could deploy
           # into that window.
-          gh release upload "$TAG" demo-data/schwab_database.db --clobber
-          gh release edit "$TAG" --notes "Rolling snapshot for the public demo — market session $NEWEST, published $(date -u +%Y-%m-%dT%H:%MZ).
+          gh release upload "$TAG" demo-data/schwab_database.db demo-data/vol_history.db --clobber
+          gh release edit "$TAG" --notes "Simulated options market for the public demo — session $NEWEST, built $(date -u +%Y-%m-%dT%H:%MZ).
+
+          **This contains no real market data.** Every quote is generated by src/synthetic_market.py: Black-Scholes over a parametric volatility surface, with a downward skew that flattens with maturity, a term structure, event bumps, and spreads that widen in the wings. It reproduces the shape of a real chain so the dashboard has something true to its purpose to work on; it is not anyone's market data and must not be used as such.
 
           Replaced automatically by .github/workflows/publish-demo.yml. The download URL is stable, so Render's DEMO_DB_URL never needs changing."
-          echo "published session $NEWEST to $TAG"
+          echo "published simulated session $NEWEST to $TAG"
 
       - name: Tell Render to redeploy
         env:

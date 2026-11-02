@@ -41,13 +41,22 @@ services:
       # API with no data behind it -- a 500 on every page is harder to
       # diagnose after the fact than a failed build.
       if [ -z "$DEMO_DB_URL" ]; then
-        echo "DEMO_DB_URL is not set. Build one with 'python -m src.build_demo_db',"
+        echo "DEMO_DB_URL is not set. Build one with 'python -m src.build_synthetic_db',"
         echo "upload it as a GitHub Release asset, and set DEMO_DB_URL to that URL."
         exit 1
       fi
       mkdir -p demo-data
       curl -fsSL "$DEMO_DB_URL" -o demo-data/schwab_database.db
       python -c "import sqlite3,sys; n=sqlite3.connect('demo-data/schwab_database.db').execute('select count(*) from options').fetchone()[0]; print(f'demo database: {n:,} contracts'); sys.exit(0 if n else 1)"
+      # The metric history is a separate database and is equally required.
+      # IV rank, IV percentile and the richness columns are all computed
+      # from it, and the copy committed to the repository holds real
+      # history derived from Schwab data -- so fetching only the chain
+      # would leave the demo serving a simulated surface scored against
+      # real numbers. Published to the same fixed tag, so the URL is
+      # stable and has a default here rather than needing a dashboard edit.
+      curl -fsSL "${DEMO_HISTORY_URL:-https://github.com/taher10/Vol-Dashboard/releases/download/demo-latest/vol_history.db}" -o demo-data/vol_history.db
+      python -c "import sqlite3,sys; n=sqlite3.connect('demo-data/vol_history.db').execute('select count(*) from metric_history').fetchone()[0]; print(f'demo history: {n:,} rows'); sys.exit(0 if n else 1)"
 
     startCommand: uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
 
@@ -76,7 +85,13 @@ services:
       # repo path, which does not exist on this box.
       - key: SCHWAB_DB_PATH
         value: demo-data/schwab_database.db
-      # Set in the Render dashboard, not here: the URL changes each time you
-      # publish a fresher snapshot.
+      # Keeps HistoryStore off the real history committed in the repo.
+      - key: VOL_HISTORY_DB_PATH
+        value: demo-data/vol_history.db
+      # Set in the Render dashboard, not here.
       - key: DEMO_DB_URL
+        sync: false
+      # Optional. The build defaults to the fixed `demo-latest` asset, so
+      # this only needs setting to point somewhere else.
+      - key: DEMO_HISTORY_URL
         sync: false

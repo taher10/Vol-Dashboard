@@ -24,6 +24,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from src import synthetic_market as sm
+from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
 
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -57,10 +58,21 @@ def build(days: int, out_dir: Path, end: date | None = None) -> Path:
     # that had drifted a column would fail in the one place nobody tests.
     SchwabDatabase(db_path)
 
+    # The metric history is a second database and is not optional. IV rank,
+    # IV percentile and the richness columns all read it, and the committed
+    # one holds real history derived from Schwab data -- so a demo running a
+    # simulated chain against it would still be publishing real numbers,
+    # just less visibly.
+    history_path = out_dir / "vol_history.db"
+    if history_path.exists():
+        history_path.unlink()
+    history = HistoryStore(history_path)
+
     sessions = _sessions(end or date.today(), days)
     conn = sqlite3.connect(db_path)
 
     total = 0
+    history_rows = 0
     for spec in sm.UNIVERSE:
         path = sm.price_path(spec, days=400, end=sessions[-1])
         conn.executemany(
@@ -71,6 +83,11 @@ def build(days: int, out_dir: Path, end: date | None = None) -> Path:
                 for d, o, h, low, c in path
             ],
         )
+
+        # A year of history behind the chains: IV rank is a percentile
+        # against the symbol's own past, so a handful of sessions would
+        # make it meaningless however good the chains were.
+        history_rows += _write_history(history_path, sm.generate_history(spec, path))
 
         # Spot on each session comes from that same simulated path, so the
         # chain and the price history agree. If they disagreed, every
@@ -94,8 +111,27 @@ def build(days: int, out_dir: Path, end: date | None = None) -> Path:
 
     _precompute(db_path, sessions[-1].isoformat())
     print(f"{total:,} contracts across {len(sm.UNIVERSE)} symbols and {len(sessions)} sessions")
+    print(f"{history_rows:,} metric-history rows")
     print(f"{db_path}  ({db_path.stat().st_size / 1e6:.1f} MB)")
+    print(f"{history_path}  ({history_path.stat().st_size / 1e6:.1f} MB)")
     return db_path
+
+
+_HISTORY_COLUMNS = "symbol snapshot_date expiration dte atm_iv skew curvature realized_vol vrp".split()
+
+
+def _write_history(path: Path, rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    conn = sqlite3.connect(path)
+    conn.executemany(
+        f"INSERT OR REPLACE INTO metric_history ({','.join(_HISTORY_COLUMNS)})"
+        f" VALUES ({','.join('?' * len(_HISTORY_COLUMNS))})",
+        [tuple(r[c] for c in _HISTORY_COLUMNS) for r in rows],
+    )
+    conn.commit()
+    conn.close()
+    return len(rows)
 
 
 def _precompute(db_path: Path, newest_day: str) -> None:

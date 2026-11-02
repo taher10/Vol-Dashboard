@@ -196,3 +196,107 @@ class TestPricePath:
         for spec in sm.UNIVERSE[:5]:
             for _, open_, high, low, close in sm.price_path(spec, days=40, end=AS_OF):
                 assert low <= min(open_, close) and high >= max(open_, close), spec.symbol
+
+
+class TestVolRegime:
+    """Without a moving vol level every history-derived number degenerates.
+
+    The first build showed IV Rank 100 at percentile 98 for a symbol whose
+    implied vol had not actually moved between sessions: the panel was
+    working and the market was not.
+    """
+
+    def test_the_level_moves_over_time(self):
+        spec = sm.UNIVERSE[0]
+        from datetime import timedelta
+
+        levels = [sm.vol_regime(spec, AS_OF - timedelta(days=i)) for i in range(0, 300, 10)]
+
+        assert max(levels) - min(levels) > 0.2
+
+    def test_it_stays_positive_and_bounded(self):
+        from datetime import timedelta
+
+        for spec in sm.UNIVERSE:
+            for i in range(0, 400, 7):
+                level = sm.vol_regime(spec, AS_OF - timedelta(days=i))
+                assert 0.4 < level < 1.8, (spec.symbol, level)
+
+    def test_it_is_deterministic(self):
+        spec = sm.UNIVERSE[0]
+
+        assert sm.vol_regime(spec, AS_OF) == sm.vol_regime(spec, AS_OF)
+
+    def test_symbols_do_not_move_in_lockstep(self):
+        """Identical phases would make every symbol rich or cheap at once,
+        and the scanner's whole job is telling them apart."""
+        levels = {s.symbol: sm.vol_regime(s, AS_OF) for s in sm.UNIVERSE}
+
+        assert len(set(round(v, 4) for v in levels.values())) > len(levels) * 0.8
+
+
+class TestGeneratedHistory:
+    def test_it_spans_enough_sessions_for_a_percentile(self):
+        spec = sm.UNIVERSE[0]
+        path = sm.price_path(spec, days=300, end=AS_OF)
+
+        rows = sm.generate_history(spec, path)
+        dates = {r["snapshot_date"] for r in rows}
+
+        assert len(dates) > 200
+
+    def test_atm_iv_actually_varies(self):
+        spec = [s for s in sm.UNIVERSE if s.symbol == "GOOGL"][0]
+        path = sm.price_path(spec, days=300, end=AS_OF)
+
+        ivs = [r["atm_iv"] for r in sm.generate_history(spec, path) if r["dte"] == 30]
+
+        assert max(ivs) - min(ivs) > 5.0
+
+    def test_rows_carry_every_column_the_store_expects(self):
+        spec = sm.UNIVERSE[0]
+        path = sm.price_path(spec, days=120, end=AS_OF)
+
+        row = sm.generate_history(spec, path)[0]
+
+        assert set(row) == {
+            "symbol", "snapshot_date", "expiration", "dte",
+            "atm_iv", "skew", "curvature", "realized_vol", "vrp",
+        }
+
+    def test_puts_stay_bid_over_calls_through_history(self):
+        spec = [s for s in sm.UNIVERSE if s.symbol == "SPX"][0]
+        path = sm.price_path(spec, days=120, end=AS_OF)
+
+        assert all(r["skew"] > 0 for r in sm.generate_history(spec, path))
+
+    def test_realized_vol_is_in_vol_points(self):
+        """Compared directly against ATM IV to form VRP, so a decimal here
+        would make every VRP reading nonsense in a subtle direction."""
+        spec = [s for s in sm.UNIVERSE if s.symbol == "TSLA"][0]
+        path = sm.price_path(spec, days=200, end=AS_OF)
+
+        rvs = [r["realized_vol"] for r in sm.generate_history(spec, path)]
+
+        assert 10.0 < sum(rvs) / len(rvs) < 150.0
+
+
+class TestHistoryStorePath:
+    def test_env_var_redirects_it(self, tmp_path, monkeypatch):
+        """Switching the chain to a simulated market is not enough on its
+        own: IV rank and the richness columns read this file, and the
+        committed one holds real history."""
+        from src.history_store import HistoryStore
+
+        target = tmp_path / "vol_history.db"
+        monkeypatch.setenv("VOL_HISTORY_DB_PATH", str(target))
+
+        assert HistoryStore().db_path == target
+
+    def test_an_explicit_path_still_wins(self, tmp_path, monkeypatch):
+        from src.history_store import HistoryStore
+
+        monkeypatch.setenv("VOL_HISTORY_DB_PATH", str(tmp_path / "from-env.db"))
+        explicit = tmp_path / "explicit.db"
+
+        assert HistoryStore(explicit).db_path == explicit

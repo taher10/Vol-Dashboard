@@ -32,6 +32,7 @@ Usage
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -68,7 +69,15 @@ class HistoryStore:
     """SQLite-backed accumulator for daily per-expiry vol metrics."""
 
     def __init__(self, db_path: Path | str | None = None) -> None:
-        self.db_path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+        # VOL_HISTORY_DB_PATH mirrors SCHWAB_DB_PATH on the chain database.
+        # The public demo needs it: switching the chain to a simulated
+        # market is not enough on its own, because IV rank, percentile and
+        # the richness columns are all computed from this file, and the
+        # committed one holds real history derived from Schwab data. Point
+        # them both away or the demo still ships real numbers, just less
+        # obviously.
+        env_path = os.environ.get("VOL_HISTORY_DB_PATH")
+        self.db_path = Path(db_path or env_path or _DEFAULT_DB_PATH)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
