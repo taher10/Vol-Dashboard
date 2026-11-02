@@ -41,9 +41,10 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from src.dashboard import data_trust
+from src.data_quality import market_session_date
 from src.history_store import HistoryStore
 from src.schwab_database import SchwabDatabase
 from src.symbols import SYMBOL_REGISTRY
@@ -199,6 +200,69 @@ def _chain_consistency_problems(
     ]
 
 
+
+def _scheduled_session_problems(
+    chain_db: "SchwabDatabase | None",
+    symbols: dict,
+    expected_session: date | None,
+) -> tuple[list[str], list[str]]:
+    """Did this run collect the session it was scheduled for? (problems, warnings)
+
+    A re-run is the case this exists for. On 2026-10-30 the Thursday
+    collection failed at 01:11 UTC and was re-run at 17:58, by which point
+    the live session had moved on -- so it collected Friday, reported
+    success, and left a permanent hole where Thursday should be. Schwab
+    serves current quotes only, so a late re-run cannot recover the day it
+    was meant to cover, and nothing in the run said so. GitHub reports the
+    latest attempt's conclusion, so the Actions list showed a green check.
+
+    `expected_session` is derived from when the run was *created*, not when
+    it executed, which is the whole point: those are the same moment for a
+    first attempt and differ for a re-run.
+
+    The two directions mean different things and are treated differently:
+
+      * Newer than expected -- the run collected a later session than the
+        one it was scheduled for, so a session has been skipped and cannot
+        be recovered. That is the failure.
+      * Older than expected -- nothing was written for the scheduled
+        session. Usually a market holiday, sometimes a quiet failure. A
+        warning, because failing here would paint every holiday red, and
+        prolonged staleness is already covered by --max-stale-days.
+    """
+    if expected_session is None or chain_db is None:
+        return [], []
+
+    stored = [
+        d
+        for d in (chain_db.latest_options_snapshot_date(symbol) for symbol in symbols)
+        if d is not None
+    ]
+    if not stored:
+        return [], ["No stored sessions at all -- cannot check against the scheduled one."]
+
+    newest = max(stored)
+    if newest > expected_session:
+        skipped = (newest - expected_session).days
+        return (
+            [
+                f"Collected session {newest} but this run was scheduled for {expected_session}. "
+                f"{skipped} day(s) were skipped and cannot be recovered -- a late re-run fetches "
+                f"whatever is live now, not the session it was meant to cover."
+            ],
+            [],
+        )
+    if newest < expected_session:
+        return (
+            [],
+            [
+                f"Nothing stored for the scheduled session {expected_session} (newest is {newest}). "
+                "Expected on a market holiday; otherwise the collection did not write."
+            ],
+        )
+    return [], []
+
+
 def validate(
     max_stale_days: int = 3,
     window_trading_days: int = 45,
@@ -207,6 +271,7 @@ def validate(
     store: HistoryStore | None = None,
     symbols: dict | None = None,
     chain_db: SchwabDatabase | None = None,
+    expected_session: date | None = None,
 ) -> int:
     """Returns a process exit code: 0 healthy, 1 problems found.
 
@@ -274,6 +339,14 @@ def validate(
     latest_date = date.fromisoformat(latest) if latest else None
     problems.extend(_chain_consistency_problems(report["symbol_count"], latest_date, chain_db))
 
+    # Did this run collect the session it was scheduled for?
+    session_problems, session_warnings = _scheduled_session_problems(
+        chain_db, symbols, expected_session
+    )
+    problems.extend(session_problems)
+    for warning in session_warnings:
+        _annotate("warning", warning)
+
     if problems:
         for p in problems:
             _annotate("error", p)
@@ -301,6 +374,14 @@ def main() -> int:
     )
     parser.add_argument("--window", type=int, default=45, help="Coverage window in collection days (default: 45).")
     parser.add_argument(
+        "--run-created-at",
+        default=None,
+        help="ISO timestamp of when this workflow run was CREATED, not when it executed. "
+        "The market session is derived from it and compared against what was stored, which "
+        "is how a late re-run collecting the wrong day gets caught. Those two moments are "
+        "identical for a first attempt and differ for a re-run, which is the whole point.",
+    )
+    parser.add_argument(
         "--thin-fraction",
         type=float,
         default=0.5,
@@ -308,6 +389,13 @@ def main() -> int:
         "expiration count (default: 0.5, i.e. a halving).",
     )
     args = parser.parse_args()
+
+    expected_session = None
+    if args.run_created_at:
+        created = datetime.fromisoformat(args.run_created_at.replace("Z", "+00:00"))
+        expected_session = market_session_date(created)
+        print(f"Run created {created.isoformat()} -> scheduled session {expected_session}")
+
     chain_db, skip_reason = open_chain_db()
     if skip_reason:
         # Announced, not swallowed. A check that quietly stops running is
@@ -318,6 +406,7 @@ def main() -> int:
         window_trading_days=args.window,
         thin_fraction=args.thin_fraction,
         chain_db=chain_db,
+        expected_session=expected_session,
     )
 
 
