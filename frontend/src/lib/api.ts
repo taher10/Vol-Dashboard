@@ -307,6 +307,11 @@ export interface ScannerRow {
 export interface ScannerResponse {
   target_dte: number;
   rows: ScannerRow[];
+  /** The newest stored market session, from snapshot_date — NOT from a row's
+   * as_of, which is a UTC fetch timestamp and lands a day later. */
+  latest_session: string | null;
+  /** Completed sessions missing since then. 0 means as fresh as it can be. */
+  sessions_behind: number | null;
 }
 
 export interface SurfaceCell {

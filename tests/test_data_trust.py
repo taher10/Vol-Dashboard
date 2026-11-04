@@ -148,3 +148,65 @@ class TestSymbolRows:
         row = report["rows"][0]
         assert row["n_observations"] == 2
         assert row["days_covered_in_window"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Freshness in sessions rather than calendar days
+# ---------------------------------------------------------------------------
+
+from datetime import datetime  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _et(y, m, d, hh, mm=0):
+    return datetime(y, m, d, hh, mm, tzinfo=_ET)
+
+
+class TestLatestCompletedSession:
+    """Today only counts once the regular session has closed in New York."""
+
+    def test_before_the_close_today_does_not_count_yet(self):
+        assert data_trust.latest_completed_session(_et(2026, 11, 2, 12, 22)) == date(2026, 10, 30)
+
+    def test_after_the_close_today_counts(self):
+        assert data_trust.latest_completed_session(_et(2026, 11, 2, 17, 0)) == date(2026, 11, 2)
+
+    def test_the_weekend_falls_back_to_friday(self):
+        assert data_trust.latest_completed_session(_et(2026, 10, 31, 10, 0)) == date(2026, 10, 30)
+        assert data_trust.latest_completed_session(_et(2026, 11, 1, 23, 0)) == date(2026, 10, 30)
+
+    def test_it_reads_eastern_regardless_of_the_callers_clock(self):
+        """The browser used to do this arithmetic in whatever timezone the
+        viewer was in. 23:00 in Los Angeles on Sunday is already Monday in
+        some zones and still the weekend in New York."""
+        from datetime import timezone
+
+        pacific_sunday_night = datetime(2026, 11, 2, 4, 0, tzinfo=timezone.utc)  # Sun 20:00 PT
+
+        assert data_trust.latest_completed_session(pacific_sunday_night) == date(2026, 10, 30)
+
+
+class TestSessionsBehind:
+    """Calendar days made every Monday morning look like a three-day outage.
+
+    The question is "have I missed a session?", and over a weekend the
+    answer is no however many days have elapsed.
+    """
+
+    def test_friday_data_on_monday_morning_is_current(self):
+        assert data_trust.sessions_behind(date(2026, 10, 30), _et(2026, 11, 2, 12, 22)) == 0
+
+    def test_friday_data_after_mondays_close_is_one_behind(self):
+        assert data_trust.sessions_behind(date(2026, 10, 30), _et(2026, 11, 2, 17, 0)) == 1
+
+    def test_a_skipped_weekday_counts(self):
+        """Wednesday's data on Friday evening, with Thursday missing."""
+        assert data_trust.sessions_behind(date(2026, 10, 28), _et(2026, 10, 30, 17, 0)) == 2
+
+    def test_data_from_the_current_session_is_zero_not_negative(self):
+        assert data_trust.sessions_behind(date(2026, 11, 2), _et(2026, 11, 2, 12, 0)) == 0
+
+    def test_no_session_is_unknown_rather_than_zero(self):
+        assert data_trust.sessions_behind(None, _et(2026, 11, 2, 12, 0)) is None
