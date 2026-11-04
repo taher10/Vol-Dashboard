@@ -24,7 +24,8 @@ user can explain is safer than a real gap quietly papered over.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 # A date is "complete" when at least this fraction of tracked symbols recorded
 # metrics for it -- the daily job writes every symbol in one run, so a date
@@ -146,3 +147,52 @@ def build_trust_report(
         ),
         "rows": rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# How far behind is the data, in sessions?
+# ---------------------------------------------------------------------------
+
+_EASTERN = ZoneInfo("America/New_York")
+_REGULAR_CLOSE = time(16, 0)
+
+
+def latest_completed_session(now: datetime | None = None) -> date:
+    """The most recent session whose closing quotes could already exist.
+
+    Today only counts once the regular session has closed in New York. At
+    noon on a Monday the freshest data anybody can have is Friday's, so
+    Monday is not yet a session anyone is behind on.
+
+    Weekends fall out of the weekday walk. Market holidays do not -- see the
+    module docstring for why this project has no holiday calendar -- so a
+    holiday reads as one session behind until the next close. That is the
+    safe direction: it overstates staleness rather than hiding it.
+    """
+    now = now or datetime.now(_EASTERN)
+    eastern_now = now.astimezone(_EASTERN)
+
+    day = eastern_now.date()
+    if day.weekday() < 5 and eastern_now.time() >= _REGULAR_CLOSE:
+        return day
+
+    day -= timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def sessions_behind(session: date | None, now: datetime | None = None) -> int | None:
+    """Completed sessions missing between `session` and the latest one.
+
+    0 means the data is as fresh as it can be. This replaces a calendar-day
+    counter that made every Monday morning read as a three-day outage, and
+    every long weekend worse -- the question being asked is "have I missed a
+    session?", not "how long since the clock last ticked".
+    """
+    if session is None:
+        return None
+    latest = latest_completed_session(now)
+    if session >= latest:
+        return 0
+    return len(trading_days(session + timedelta(days=1), latest))

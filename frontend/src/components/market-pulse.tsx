@@ -6,7 +6,7 @@ import { ArrowUpRight } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type ScannerRow } from "@/lib/api";
-import { fmtNum, fmtSigned } from "@/lib/format";
+import { fmtDate, fmtNum, fmtSigned } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /** The state of the whole book, above the fold.
@@ -22,14 +22,23 @@ import { cn } from "@/lib/utils";
  * "that one looks extreme" to "show me the trade" is one click rather than a
  * sidebar switch plus a page change. */
 
-function freshness(asOf: string | null): { label: string; tone: string } {
-  if (!asOf) return { label: "no data", tone: "text-neg" };
-  const hours = (Date.now() - new Date(asOf).getTime()) / 36e5;
-  if (hours < 24) return { label: `${Math.max(0, Math.round(hours))}h ago`, tone: "text-pos" };
-  const days = Math.round(hours / 24);
-  // Past a couple of days the numbers below describe a market that has moved
-  // on, which is worth saying loudly rather than printing a quiet timestamp.
-  return { label: `${days}d ago`, tone: days > 2 ? "text-neg" : "text-amber-400" };
+/** Freshness in trading sessions, not calendar days.
+ *
+ * This used to count hours since the as_of timestamp, which made every
+ * Monday morning read as a three-day outage and every long weekend worse:
+ * Friday's close is the freshest data in existence until Monday's close
+ * happens, so "3d ago" described the calendar rather than the data. The
+ * question being asked is "have I missed a session?".
+ *
+ * The count comes from the API because answering it needs market hours and
+ * a weekday calendar, and the browser's clock is in whoever's timezone
+ * happens to be looking -- this project has already shipped two bugs from
+ * deriving Eastern dates somewhere that did not know about Eastern. */
+function freshness(behind: number | null): { label: string; tone: string } {
+  if (behind === null) return { label: "no data", tone: "text-neg" };
+  if (behind === 0) return { label: "current", tone: "text-pos" };
+  if (behind === 1) return { label: "1 behind", tone: "text-amber-400" };
+  return { label: `${behind} behind`, tone: "text-neg" };
 }
 
 function Metric({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
@@ -91,13 +100,21 @@ function ExtremeList({
 
 export function MarketPulse() {
   const [rows, setRows] = useState<ScannerRow[]>([]);
+  const [session, setSession] = useState<{ latest: string | null; behind: number | null }>({
+    latest: null,
+    behind: null,
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     api
       .scanner()
-      .then((res) => !cancelled && setRows(res.rows))
+      .then((res) => {
+        if (cancelled) return;
+        setRows(res.rows);
+        setSession({ latest: res.latest_session, behind: res.sessions_behind });
+      })
       .catch(() => undefined)
       .finally(() => !cancelled && setLoading(false));
     return () => {
@@ -131,7 +148,6 @@ export function MarketPulse() {
       // "top 3" regardless would dress up a flat day as an opportunity.
       richest: byZ.filter((r) => (r.richness_z ?? 0) >= 1).slice(0, 3),
       cheapest: byZ.filter((r) => (r.richness_z ?? 0) <= -1).reverse().slice(0, 3),
-      asOf: rows.find((r) => r.as_of)?.as_of ?? null,
       thin: rows.filter((r) => r.days_of_history < 10).length,
     };
   }, [rows]);
@@ -139,13 +155,18 @@ export function MarketPulse() {
   if (loading) return <Skeleton className="mb-4 h-28 w-full" />;
   if (rows.length === 0) return null;
 
-  const fresh = freshness(stats.asOf);
+  const fresh = freshness(session.behind);
 
   return (
     <div className="mb-4 overflow-hidden rounded-lg border border-border bg-card">
       <div className="flex flex-wrap items-start gap-x-8 gap-y-3 border-b border-border/70 px-4 py-3">
         <Metric label="Symbols" value={String(rows.length)} sub={stats.thin ? `${stats.thin} thin history` : "all tracked"} />
-        <Metric label="Snapshot" value={fresh.label} tone={fresh.tone} sub="data age" />
+        <Metric
+          label="Snapshot"
+          value={fresh.label}
+          tone={fresh.tone}
+          sub={session.latest ? fmtDate(session.latest) : "no session"}
+        />
         <Metric
           label="IV Rank"
           value={stats.median !== null ? fmtNum(stats.median, 0) : "—"}

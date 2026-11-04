@@ -344,7 +344,36 @@ def _scanner_row(symbol: str, target_dte: int) -> dict:
 
 @router.get("/scanner")
 def scanner(target_dte: int = Query(30, ge=0, le=3650)) -> dict:
-    return {"target_dte": target_dte, "rows": [_scanner_row(sym, target_dte) for sym in SYMBOL_REGISTRY]}
+    rows = [_scanner_row(sym, target_dte) for sym in SYMBOL_REGISTRY]
+
+    # Freshness in sessions, not calendar days. The Overview used to derive
+    # "3d ago" from the as_of timestamp in the browser, which made every
+    # Monday morning read as a three-day outage and every long weekend
+    # worse -- Friday's close is the freshest data in existence until
+    # Monday's close happens. The question is "have I missed a session?",
+    # and answering it needs market hours and a weekday calendar, which
+    # belong here rather than in a component.
+    # The session comes from the stored snapshot_date, NOT from as_of.
+    # as_of is the fetch timestamp in UTC, and collection runs at about
+    # 21:00 Eastern -- past midnight UTC -- so truncating it yields the
+    # following day. The first version of this did exactly that and
+    # reported Friday's data as a Saturday session, which is the same
+    # UTC-versus-Eastern trap that already makes every snapshot commit
+    # message a day ahead of the data inside it.
+    db = _db()
+    stored = [
+        d
+        for d in (db.latest_options_snapshot_date(sym) for sym in SYMBOL_REGISTRY)
+        if d is not None
+    ]
+    latest_date = max(stored) if stored else None
+
+    return {
+        "target_dte": target_dte,
+        "rows": rows,
+        "latest_session": latest_date.isoformat() if latest_date else None,
+        "sessions_behind": data_trust_report.sessions_behind(latest_date),
+    }
 
 
 @_data_cached
