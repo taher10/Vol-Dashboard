@@ -6,7 +6,7 @@ import { ArrowUpRight } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type ScannerRow } from "@/lib/api";
-import { fmtDate, fmtNum, fmtSigned } from "@/lib/format";
+import { fmtDateTime, fmtNum, fmtSigned } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /** The state of the whole book, above the fold.
@@ -22,23 +22,26 @@ import { cn } from "@/lib/utils";
  * "that one looks extreme" to "show me the trade" is one click rather than a
  * sidebar switch plus a page change. */
 
-/** Freshness in trading sessions, not calendar days.
+/** When the snapshot was fetched, and how long ago.
  *
- * This used to count hours since the as_of timestamp, which made every
- * Monday morning read as a three-day outage and every long weekend worse:
- * Friday's close is the freshest data in existence until Monday's close
- * happens, so "3d ago" described the calendar rather than the data. The
- * question being asked is "have I missed a session?".
+ * Reports elapsed clock time, which is what was asked for. Worth knowing
+ * what that does and does not tell you: it measures the calendar, not the
+ * market, so a Monday morning reads ~65h after Friday's close even though
+ * no session has been missed, and a long weekend reads longer still. A
+ * large number here means "time has passed", not necessarily "data is
+ * missing".
  *
- * The count comes from the API because answering it needs market hours and
- * a weekday calendar, and the browser's clock is in whoever's timezone
- * happens to be looking -- this project has already shipped two bugs from
- * deriving Eastern dates somewhere that did not know about Eastern. */
-function freshness(behind: number | null): { label: string; tone: string } {
-  if (behind === null) return { label: "no data", tone: "text-neg" };
-  if (behind === 0) return { label: "current", tone: "text-pos" };
-  if (behind === 1) return { label: "1 behind", tone: "text-amber-400" };
-  return { label: `${behind} behind`, tone: "text-neg" };
+ * The API still returns sessions_behind alongside this if the other
+ * reading is ever wanted back -- see data_trust.sessions_behind. */
+function freshness(asOf: string | null): { label: string; tone: string } {
+  if (!asOf) return { label: "no data", tone: "text-neg" };
+  const hours = (Date.now() - new Date(asOf).getTime()) / 36e5;
+  if (hours < 1) return { label: "just now", tone: "text-pos" };
+  const whole = Math.round(hours);
+  return {
+    label: `${whole}h ago`,
+    tone: whole < 24 ? "text-pos" : whole < 48 ? "text-amber-400" : "text-neg",
+  };
 }
 
 function Metric({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
@@ -100,10 +103,7 @@ function ExtremeList({
 
 export function MarketPulse() {
   const [rows, setRows] = useState<ScannerRow[]>([]);
-  const [session, setSession] = useState<{ latest: string | null; behind: number | null }>({
-    latest: null,
-    behind: null,
-  });
+  const [asOf, setAsOf] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -113,7 +113,10 @@ export function MarketPulse() {
       .then((res) => {
         if (cancelled) return;
         setRows(res.rows);
-        setSession({ latest: res.latest_session, behind: res.sessions_behind });
+        // The newest fetch across symbols, not the first row's: each symbol
+        // is pulled a second or two apart, so row order is not recency.
+        const stamps = res.rows.map((r) => r.as_of).filter((v): v is string => Boolean(v));
+        setAsOf(stamps.length ? stamps.reduce((a, b) => (a > b ? a : b)) : null);
       })
       .catch(() => undefined)
       .finally(() => !cancelled && setLoading(false));
@@ -155,7 +158,7 @@ export function MarketPulse() {
   if (loading) return <Skeleton className="mb-4 h-28 w-full" />;
   if (rows.length === 0) return null;
 
-  const fresh = freshness(session.behind);
+  const fresh = freshness(asOf);
 
   return (
     <div className="mb-4 overflow-hidden rounded-lg border border-border bg-card">
@@ -165,7 +168,7 @@ export function MarketPulse() {
           label="Snapshot"
           value={fresh.label}
           tone={fresh.tone}
-          sub={session.latest ? fmtDate(session.latest) : "no session"}
+          sub={asOf ? fmtDateTime(asOf) : "no snapshot"}
         />
         <Metric
           label="IV Rank"
