@@ -458,21 +458,55 @@ def calendar_variance_edge(
     }
 
 
+#: Structures whose legs expire on DIFFERENT dates. They share every
+#: consequence that matters downstream -- no honest max_profit, no payoff
+#: curve, and no intrinsic settlement for a backtest to close against --
+#: so callers should test membership here rather than comparing against one
+#: label. Added when build_calendar_call() started reporting the two cases
+#: under their real names: a same-strike pair genuinely is a calendar, a
+#: delta-matched pair genuinely is a diagonal, and backtest_engine's
+#: "never intrinsic-settles" branch is true of both.
+TWO_EXPIRATION_STRUCTURES = frozenset({"Calendar Call Spread", "Diagonal Call Spread"})
+
+
 def build_calendar_call(
     chain: pd.DataFrame,
     front_expiration: pd.Timestamp,
     back_expiration: pd.Timestamp,
     target_delta: float = 0.25,
     dte_for: Callable[[pd.Timestamp], int] | None = None,
+    same_strike: bool = False,
 ) -> Candidate | None:
     """
-    Sell a front-month call near `target_delta`, buy the same-delta call on a
-    later `back_expiration` -- a classic pre-event calendar, structured to
-    profit if the front leg's (typically event-inflated) IV crushes faster
-    than the back leg's. Each leg is picked independently on its own
-    expiration's chain slice (not pinned to the same strike), matching how a
-    trader actually screens this: same delta, whatever strike that lands on
-    each month.
+    Sell a front-month call near `target_delta`, buy a call on a later
+    `back_expiration` -- structured to profit if the front leg's (typically
+    event-inflated) IV crushes faster than the back leg's.
+
+    `same_strike` picks which of two genuinely different structures you get,
+    and the difference is larger than it looks:
+
+    - **False (default)** -- each leg is picked independently at
+      `target_delta` on its own expiration's chain slice, matching how a
+      trader screens: same delta, whatever strike that lands on each month.
+      Because the smile and the drift differ by expiration, the two legs
+      routinely land on DIFFERENT strikes, which makes this a **diagonal**:
+      a calendar with a vertical embedded in it. That vertical is real risk
+      -- a big enough move loses the strike width (see max_loss below) -- and
+      it is invisible in `variance_edge`, which models only the IV path.
+
+    - **True** -- the back leg is pinned to the front leg's strike (snapped
+      to the nearest strike actually listed on that expiration, since strike
+      grids differ between expirations). This is a **true calendar**, and it
+      is the structure `calendar_variance_edge()` actually models: that
+      decomposition is a FIXED-STRIKE forward variance, so feeding it two IVs
+      read off different strikes mixes two points on the smile and describes
+      a position nobody is holding. Max loss also collapses to the net debit,
+      because with one strike there is no width to lose.
+
+    Neither mode is an arbitrage screen. A genuine calendar arbitrage is a
+    violation of total variance being non-decreasing in maturity at fixed
+    moneyness, and it would present as a CREDIT that cannot lose -- not as a
+    debit with a modeled edge attached.
 
     `dte_for` decides what "days to expiry" means, and it matters more here
     than anywhere else in this module: the variance decomposition divides by
@@ -503,8 +537,10 @@ def build_calendar_call(
     remaining extrinsic value on the back leg shrinks toward zero deep
     ITM -- and the position's value converges to the STRIKE WIDTH times the
     contract multiplier, adjusted by the debit/credit. When front and back
-    strikes differ (the common case here, since legs are matched by delta
-    not strike), this upside bound is often much larger than the debit --
+    strikes differ (the common case with same_strike=False, since legs are
+    then matched by delta not strike), this upside bound is often much
+    larger than the debit -- and when they match it collapses to exactly the
+    debit, which is the textbook calendar answer and needs no special case --
     confirmed against a real OptionStrat quote (AAPL 325C/335C: debit
     $65.50, real modeled max loss $983.40, this formula's bound $1065.50 --
     correctly the same order of magnitude and, as intended, conservatively
@@ -525,9 +561,20 @@ def build_calendar_call(
     if front_chain.empty or back_chain.empty:
         return None
 
+    # The front leg anchors the trade either way: it is the one being sold,
+    # and target_delta is how the caller says which call to sell.
     front_row = _nearest_to_delta(front_chain, "CALL", target_delta)
-    back_row = _nearest_to_delta(back_chain, "CALL", target_delta)
-    if front_row is None or back_row is None:
+    if front_row is None:
+        return None
+    # steps=0 makes _strike_neighbor a pure "snap to the nearest listed
+    # strike" lookup, which is exactly what pinning needs -- the back month
+    # often has a coarser grid, so the front strike may not be listed there.
+    back_row = (
+        _strike_neighbor(back_chain, "CALL", float(front_row["strikePrice"]), 0, 1)
+        if same_strike
+        else _nearest_to_delta(back_chain, "CALL", target_delta)
+    )
+    if back_row is None:
         return None
 
     front_dte = int(dte_for(front_expiration)) if dte_for else int(front_row["dte"])
@@ -564,8 +611,14 @@ def build_calendar_call(
     # position was opened for a large enough net credit.
     max_loss = max(0.0, net_debit_credit, net_debit_credit + (back_strike - front_strike) * CONTRACT_MULTIPLIER)
 
+    # Named from the strikes that were actually selected, not from the flag
+    # that asked for them. same_strike=True snaps to the nearest LISTED
+    # strike, so a coarse back-month grid can still leave a gap -- and a
+    # structure carrying a vertical should say so whatever was requested.
+    structure = "Calendar Call Spread" if back_strike == front_strike else "Diagonal Call Spread"
+
     return Candidate(
-        structure="Calendar Call Spread",
+        structure=structure,
         direction="neutral",
         expiration=front_expiration,
         dte=front_dte,

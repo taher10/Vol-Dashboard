@@ -446,7 +446,9 @@ def scanner_pcr(expiration: str | None = Query(None)) -> dict:
 
 
 @_data_cached
-def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta: float) -> dict | None:
+def _calendar_edge_row(
+    symbol: str, front_dte: int, back_dte: int, target_delta: float, same_strike: bool
+) -> dict | None:
     """One symbol's calendar-edge estimate for the Vol Scanner's leaderboard
     -- picks this symbol's own nearest-available expirations to
     front_dte/back_dte, then reuses strategy_engine.build_calendar_call()
@@ -485,7 +487,7 @@ def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta:
     # maturities several days longer than the ones this row reports -- the
     # ranking and the DTEs shown beside it would disagree.
     candidate = strategy_engine.build_calendar_call(
-        chain, front_expiration, back_expiration, target_delta, dte_for=_live_dte
+        chain, front_expiration, back_expiration, target_delta, dte_for=_live_dte, same_strike=same_strike
     )
     if candidate is None or candidate.variance_edge is None:
         return None
@@ -517,6 +519,15 @@ def _calendar_edge_row(symbol: str, front_dte: int, back_dte: int, target_delta:
         "est_max_loss": clean_value(est_max_loss),
         "net_vega_pnl": clean_value(candidate.variance_edge["net_vega_pnl"]),
         "edge_per_capital_pct": edge_per_capital_pct,
+        # The strike gap this row is actually carrying. Zero for a true
+        # calendar; anything else is an embedded vertical, and it is where
+        # est_max_loss above comes from. Reported per row rather than
+        # inferred from the request flag, because same_strike snaps to the
+        # nearest LISTED strike and a coarse back-month grid can still
+        # leave a gap.
+        "strike_width": clean_value(
+            abs(candidate.legs[1].strike - candidate.legs[0].strike)
+        ),
         # When the underlying snapshot was taken. The ranking is only as
         # current as the data behind it, and nothing on this page said so.
         "as_of": bundle.as_of.isoformat(),
@@ -537,13 +548,24 @@ def scanner_calendar_edge(
     front_dte: int = Query(7, ge=0, le=3650),
     back_dte: int = Query(30, ge=0, le=3650),
     target_delta: float = Query(0.25, gt=0.0, lt=0.5),
+    # Defaults to the true calendar: it is the structure the variance
+    # decomposition behind this ranking actually models (fixed-strike
+    # forward variance), and the delta-matched alternative silently carries
+    # a vertical whose risk that metric says nothing about.
+    same_strike: bool = Query(True),
 ) -> dict:
     rows = [
         row
         for symbol in SYMBOL_REGISTRY
-        if (row := _calendar_edge_row(symbol, front_dte, back_dte, target_delta)) is not None
+        if (row := _calendar_edge_row(symbol, front_dte, back_dte, target_delta, same_strike)) is not None
     ]
-    return {"front_dte": front_dte, "back_dte": back_dte, "target_delta": target_delta, "rows": rows}
+    return {
+        "front_dte": front_dte,
+        "back_dte": back_dte,
+        "target_delta": target_delta,
+        "same_strike": same_strike,
+        "rows": rows,
+    }
 
 
 @_data_cached

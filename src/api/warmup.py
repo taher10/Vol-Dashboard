@@ -50,7 +50,10 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # /scanner/delta-neutral stayed at 0.42s through the first version of this.
 # test_warmup.py asserts these against the live signatures.
 _DEFAULT_TARGET_DTE = 30            # scanner, gamma-exposure, delta-neutral
-_DEFAULT_CALENDAR = (7, 30, 0.25)   # calendar-edge: front, back, delta
+# front, back, delta, same_strike. same_strike is part of the cache key, so
+# warming False while the page defaults to True is precisely the mismatch
+# described above -- it would warm the diagonal and leave the calendar cold.
+_DEFAULT_CALENDAR = (7, 30, 0.25, True)
 _DEFAULT_TERM_STRUCTURE = (7, 60)   # term-structure: near, far
 _DEFAULT_DELTA = 0.50               # delta-neutral
 

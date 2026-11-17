@@ -81,3 +81,57 @@ Related: nothing in this app distinguishes "today's snapshot" from "a snapshot f
 ## Format helpers
 
 `fmtUsd`/`fmtNum`/`fmtSigned`/`fmtPct` (all in `frontend/src/lib/format.ts`) already handle `null`/`undefined` by rendering `"—"`. Don't add ad-hoc null guards around them — the one place worth deviating is when `null` means something more specific than "no data," like "uncapped" for an open-ended risk side (see the Delta Neutral page's table, which shows the literal word "Uncapped" instead of a dash for exactly this reason).
+
+## A metric must describe the structure it is attached to
+
+A fourth anti-fabrication case, and the subtlest so far: every number was
+computed correctly, the structure was built correctly, and they still did not
+belong together.
+
+`build_calendar_call` picks each leg independently at `target_delta` on its own
+expiration. That is deliberate and matches how a trader screens — but because
+the smile differs by expiration, the two legs routinely land on **different
+strikes**, which makes the result a *diagonal*, not a calendar. Meanwhile
+`calendar_variance_edge` computes a **fixed-strike** forward variance
+(`IV_ex = sqrt[(IV_b²T_b − IV_f²T_f)/(T_b−T_f)]`). Feeding it two IVs read off
+different strikes mixes two points on the smile, so the edge described a
+position nobody was holding — and said nothing at all about the embedded
+vertical, which is where the risk actually lived.
+
+Found when a user built one of these in OptionStrat and asked why a trade the
+page ranked well looked so unfavourable. Measured on the 2026-11-13 snapshot:
+delta-matched legs produced **0 of 24** true calendars, strike widths of 6.5 to
+200 points, and a median est. max loss **2.7x** the pinned equivalent. The
+screened SPX row was a $605 debit carrying a $20,605 worst case.
+
+The fix (`same_strike=True`, now the Calendar page default) pins the back leg to
+the front leg's strike via `_strike_neighbor(..., steps=0, direction_sign=1)` —
+that helper's "snap to the nearest listed strike" behaviour is exactly what
+pinning needs, so no new selection code was required.
+
+Three things worth carrying forward:
+
+- **Ask what structure a formula assumes, not just whether it computes.** The
+  dte-staleness bug, the max-loss bug and this one are all one family: a correct
+  formula fed inputs from a different thing than the one on screen.
+- **Name a structure from what was selected, not from what was requested.**
+  Pinning snaps to the nearest *listed* strike, and back months run coarser
+  grids — on that same snapshot, 13 of 24 symbols still ended up 0.5–5 points
+  apart. The `structure` label and the new `strike_width` field are both derived
+  from the actual legs, so a thin diagonal still says "Diagonal Call Spread".
+  A flag describes an intention; the legs describe the trade.
+- **A label used as a branch condition is an API.** `backtest_engine` keyed its
+  "never intrinsic-settles" branch on `structure == "Calendar Call Spread"`.
+  Renaming the delta-matched case would have silently stopped that branch
+  firing and started framing those positions against a max_profit/max_loss they
+  do not have — a wrong number arriving by way of a string. Hence
+  `strategy_engine.TWO_EXPIRATION_STRUCTURES`, which names the real predicate
+  (legs expiring on different dates). Prefer a shared set over an `==` whenever
+  a label drives behaviour.
+
+One caveat on the page copy: it now states plainly that **neither mode is an
+arbitrage screen**. No calendar-arbitrage violation exists in this data — total
+variance was verified monotone across all 21 SPX expirations — and a real one
+would present as a credit that cannot lose, not a debit with a modeled edge.
+That wording exists because "calendar arbitrage" was the informal name for this
+page, and the name set an expectation the maths never claimed.

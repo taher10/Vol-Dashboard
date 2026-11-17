@@ -377,6 +377,11 @@ export interface CalendarEdgeRow {
   /** Modeled edge as a % of capital required -- a more comparable ranking
    * than the raw dollar edge alone. Null when est_max_loss is 0/unavailable. */
   edge_per_capital_pct: number | null;
+  /** Gap between the two legs' strikes. 0 is a true calendar; anything else
+   * is an embedded vertical, and is where est_max_loss above comes from.
+   * Read this rather than the request's same_strike flag -- pinning snaps to
+   * the nearest listed strike, so a coarse back month can still leave a gap. */
+  strike_width: number;
   /** When the underlying snapshot was taken. The ranking is only as current
    * as the data behind it. */
   as_of: string;
@@ -413,6 +418,10 @@ export interface CalendarEdgeResponse {
   front_dte: number;
   back_dte: number;
   target_delta: number;
+  /** Whether the back leg was pinned to the front leg's strike (a true
+   * calendar) or picked at the same delta on its own expiration (a diagonal
+   * -- it carries a vertical the edge metric says nothing about). */
+  same_strike: boolean;
   rows: CalendarEdgeRow[];
 }
 
@@ -565,11 +574,12 @@ export const api = {
 
   scannerPcr: (expiration?: string) => apiGet<PcrResponse>("/api/scanner/pcr", { expiration }),
 
-  calendarEdge: (frontDte = 7, backDte = 30, targetDelta = 0.25) =>
+  calendarEdge: (frontDte = 7, backDte = 30, targetDelta = 0.25, sameStrike = true) =>
     apiGet<CalendarEdgeResponse>("/api/scanner/calendar-edge", {
       front_dte: frontDte,
       back_dte: backDte,
       target_delta: targetDelta,
+      same_strike: sameStrike,
     }),
 
   termStructure: (nearDte = 7, farDte = 60) =>

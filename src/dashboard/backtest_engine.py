@@ -174,10 +174,16 @@ def _summary_sentence(
     # "open" forever, and there's no max_profit/max_loss to frame pnl
     # against. The walk itself is still 100% real recorded prices; only the
     # framing differs.
-    if candidate.structure == "Calendar Call Spread":
+    # Membership, not equality: build_calendar_call() now names a
+    # delta-matched pair a "Diagonal Call Spread" (it is one), and this
+    # branch is about legs expiring on different dates, which is true of
+    # both. An == check here would have silently stopped firing and started
+    # framing these against a max_profit/max_loss they don't have.
+    if candidate.structure in strategy_engine.TWO_EXPIRATION_STRUCTURES:
         direction_word = "up" if pnl >= 0 else "down"
+        structure_word = candidate.structure.split()[0].lower()
         return (
-            f"Opened {entry_label} -- {days_held} real trading {day_word} later, this calendar is "
+            f"Opened {entry_label} -- {days_held} real trading {day_word} later, this {structure_word} is "
             f"{direction_word} ${abs(pnl):.2f}/share, marked using real recorded option prices for both legs "
             f"through {latest.date.strftime('%b %d')} (the most recent day both legs were still quoted). "
             f"Not modeled beyond that point."

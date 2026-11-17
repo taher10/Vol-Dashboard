@@ -32,7 +32,11 @@ const FRONT_DTE_CHOICES = [0, 7, 14, 21];
 const BACK_DTE_CHOICES = [30, 45, 60, 90];
 const DELTA_CHOICES = [0.15, 0.25, 0.35, 0.45];
 
-function Control({
+const STRIKE_MODE_CHOICES = [true, false];
+
+/** Generic over the choice type so the same segmented control can hold the
+ * numeric DTE/delta pickers and the boolean strike-mode toggle. */
+function Control<T extends string | number | boolean>({
   label,
   value,
   choices,
@@ -40,10 +44,10 @@ function Control({
   onChange,
 }: {
   label: string;
-  value: number;
-  choices: number[];
-  format: (v: number) => string;
-  onChange: (v: number) => void;
+  value: T;
+  choices: readonly T[];
+  format: (v: T) => string;
+  onChange: (v: T) => void;
 }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -51,7 +55,7 @@ function Control({
       <div className="inline-flex overflow-hidden rounded-md border border-border">
         {choices.map((c) => (
           <button
-            key={c}
+            key={String(c)}
             type="button"
             onClick={() => onChange(c)}
             className={cn(
@@ -111,9 +115,20 @@ function StructureDetail({ row }: { row: CalendarEdgeRow }) {
             ))}
           </tbody>
         </table>
+        {/* Read from the row, not from the requested mode: pinning snaps to
+            the nearest LISTED strike, so a coarse back-month grid can leave a
+            gap even when "Same" was asked for. */}
         <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-          Legs are matched by delta, not strike — so the two strikes usually differ, which is exactly why est. max
-          loss can exceed the net debit.
+          <span className="font-mono text-foreground">Width {fmtNum(row.strike_width, 0)}</span>
+          {row.strike_width === 0 ? (
+            <> — both legs on one strike, so est. max loss is exactly the net debit.</>
+          ) : (
+            <>
+              {" "}
+              — the legs sit on different strikes, so this carries an embedded vertical. That width is what makes
+              est. max loss exceed the net debit, and the modeled edge does not account for it.
+            </>
+          )}
         </p>
       </div>
 
@@ -187,6 +202,9 @@ export default function CalendarMathPage() {
   const [frontDte, setFrontDte] = useState(7);
   const [backDte, setBackDte] = useState(30);
   const [targetDelta, setTargetDelta] = useState(0.25);
+  // Defaults to the true calendar -- the structure the variance
+  // decomposition behind this ranking actually models.
+  const [sameStrike, setSameStrike] = useState(true);
 
   // Same-day estimate, every symbol in one call -- unlike a real backtest,
   // needs no walk-forward history, so a symbol added yesterday shows up here
@@ -197,7 +215,7 @@ export default function CalendarMathPage() {
     setLoading(true);
     setError(null);
     api
-      .calendarEdge(frontDte, backDte, targetDelta)
+      .calendarEdge(frontDte, backDte, targetDelta, sameStrike)
       .then((res) => !cancelled && setRows(res.rows))
       .catch(
         (err) =>
@@ -215,7 +233,7 @@ export default function CalendarMathPage() {
     return () => {
       cancelled = true;
     };
-  }, [frontDte, backDte, targetDelta]);
+  }, [frontDte, backDte, targetDelta, sameStrike]);
 
   const scales = useMemo(
     () => ({
@@ -275,12 +293,26 @@ export default function CalendarMathPage() {
             this dashboard does not backtest, so treat it as a structural-edge estimate, not evidence.
           </p>
           <p className="mb-2">
+            <span className="text-foreground">Strikes: Same</span> pins the back leg to the front leg&apos;s
+            strike -- a true calendar, and the structure the decomposition above actually models, since that
+            maths is a fixed-strike forward variance.{" "}
+            <span className="text-foreground">Delta-matched</span> picks each leg at the target delta on its own
+            expiration, which is how a trader screens but routinely lands on two different strikes. That makes it
+            a diagonal: a calendar with a vertical inside it, carrying directional risk the modeled edge says
+            nothing about. The <span className="text-foreground">Width</span> on each expanded row is that gap.
+          </p>
+          <p className="mb-2">
             <span className="text-foreground">Net debit</span> is the real capital required.{" "}
             <span className="text-foreground">Est. max loss</span> is a genuine worst-case UPPER BOUND from real
-            strike/premium algebra -- a big enough move can lose more than the debit when front and back strikes
-            differ, since legs are delta-matched rather than same-strike. It conservatively ignores the back
-            leg&apos;s remaining time value, so the true worst case is typically a bit lower than shown, never
-            higher.
+            strike/premium algebra. With one strike it is simply the debit. Once the strikes differ a big enough
+            move can lose the strike width on top, which is often many times the debit. It conservatively ignores
+            the back leg&apos;s remaining time value, so the true worst case is typically a bit lower than shown,
+            never higher.
+          </p>
+          <p className="mb-2">
+            Neither mode is an arbitrage screen. A genuine calendar arbitrage is a violation of total variance
+            rising with maturity, and it would show up as a credit that cannot lose -- not as a debit with a
+            modeled edge attached.
           </p>
           <p>
             Max profit is deliberately absent. Unlike max loss it is reached at an interior stock price rather
@@ -313,6 +345,13 @@ export default function CalendarMathPage() {
             choices={DELTA_CHOICES}
             format={(v) => v.toFixed(2)}
             onChange={setTargetDelta}
+          />
+          <Control
+            label="Strikes"
+            value={sameStrike}
+            choices={STRIKE_MODE_CHOICES}
+            format={(v) => (v ? "Same" : "Delta-matched")}
+            onChange={setSameStrike}
           />
           {asOf && (
             <span className="text-[11px] text-muted-foreground">

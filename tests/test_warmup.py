@@ -37,10 +37,11 @@ class TestWarmConstantsMatchTheEndpoints:
         assert warmup._DEFAULT_TARGET_DTE == _query_default(routes.scanner, "target_dte")
 
     def test_calendar_edge(self):
-        front, back, delta = warmup._DEFAULT_CALENDAR
+        front, back, delta, same_strike = warmup._DEFAULT_CALENDAR
         assert front == _query_default(routes.scanner_calendar_edge, "front_dte")
         assert back == _query_default(routes.scanner_calendar_edge, "back_dte")
         assert delta == _query_default(routes.scanner_calendar_edge, "target_delta")
+        assert same_strike == _query_default(routes.scanner_calendar_edge, "same_strike")
 
     def test_term_structure(self):
         near, far = warmup._DEFAULT_TERM_STRUCTURE
