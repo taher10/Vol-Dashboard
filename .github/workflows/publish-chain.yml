@@ -1,0 +1,118 @@
+name: Seed the chain release asset
+
+# ONE-OFF. Run this once from the Actions tab, confirm the asset, then merge
+# the migration PR that deletes this file.
+#
+# Why it exists
+# -------------
+# database/schwab_database.db is moving out of Git LFS onto a release asset
+# (see the migration PR for why: LFS stores a complete new 658MB copy per
+# push, which took the quota to 9.01GB of an included 10GB while the daily
+# growth rate never changed).
+#
+# The migration cannot land first. The daily job appends to the PREVIOUS
+# database, so once the file is untracked it has to download the asset to
+# get that previous state. If no asset exists yet, the job starts from an
+# empty database and uploads that -- replacing four months of chains with
+# nothing. Schwab serves current chains only, so there is no backfill.
+#
+# So the asset gets seeded here, from the LFS copy, before anything is
+# untracked. This runs on GitHub's network rather than a home upload link,
+# and it costs LFS *bandwidth* (never metered on this repo) rather than
+# storage.
+#
+# Safe to re-run: --clobber replaces the asset in place and the verification
+# below refuses to publish anything that does not look like the real
+# database.
+
+on:
+  workflow_dispatch: {} # deliberately no schedule -- this is a one-off
+
+permissions:
+  contents: write # creating the release and uploading its asset
+
+concurrency:
+  # Two runs racing would delete each other's asset mid-upload, leaving the
+  # tag with no file attached -- which is exactly the state the migration
+  # must never find. Same reasoning as publish-demo.yml.
+  group: publish-chain
+  cancel-in-progress: false
+
+env:
+  TAG: chain-latest
+
+jobs:
+  seed:
+    # Pinned for the same reason as daily-snapshot.yml: this job handles data
+    # that cannot be refetched, so it should not break on an unannounced
+    # runner-image change.
+    runs-on: ubuntu-24.04
+    steps:
+      # lfs: true is the entire point of this workflow -- it is the last time
+      # anything in CI pulls this file out of LFS. Without it the checkout
+      # leaves a ~134-byte pointer at that path and the verification below
+      # fails with "file is not a database", which is how run #2 of the
+      # validator broke on 2026-09-15.
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      # Verify BEFORE publishing. The whole migration rests on this asset
+      # being the real database, so a pointer file, a truncated checkout or
+      # a schema change must stop here rather than seed the move with
+      # something broken.
+      #
+      # Floors rather than exact counts, so a re-run after more collection
+      # still passes. sqlite3 is stdlib, so there is nothing to pip install.
+      - name: Verify the database before publishing
+        run: |
+          python3 - <<'PY'
+          import os, sqlite3, sys
+          db = "database/schwab_database.db"
+          size = os.path.getsize(db)
+          if size < 100_000_000:
+              sys.exit(f"Refusing to publish: {db} is {size} bytes -- an LFS pointer is ~134, the real file is ~658MB.")
+          c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+          rows = c.execute("SELECT COUNT(*) FROM options").fetchone()[0]
+          sessions, lo, hi = c.execute(
+              "SELECT COUNT(DISTINCT snapshot_date), MIN(snapshot_date), MAX(snapshot_date) FROM options"
+          ).fetchone()
+          prices = c.execute("SELECT COUNT(*) FROM stock_prices").fetchone()[0]
+          print(f"{size/1e6:.0f} MB, {rows:,} contract rows, {prices:,} price rows, {sessions} sessions, {lo} -> {hi}")
+          problems = []
+          if rows < 1_000_000: problems.append(f"only {rows:,} contract rows")
+          if sessions < 30: problems.append(f"only {sessions} sessions")
+          if prices < 1_000: problems.append(f"only {prices:,} price rows")
+          if problems:
+              sys.exit("Refusing to publish: " + "; ".join(problems))
+          PY
+
+      - name: Publish to the fixed release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Raw options chain database (latest)" \
+              --notes "Seeding; notes replaced below." \
+              --prerelease
+          fi
+
+          # --clobber replaces the asset in place, keeping the download URL
+          # identical. Deleting and re-creating the release would briefly
+          # leave the URL 404ing, and the daily job curls that exact URL to
+          # get the state it appends to.
+          gh release upload "$TAG" database/schwab_database.db --clobber
+
+          NEWEST=$(python3 -c "import sqlite3;print(sqlite3.connect('file:database/schwab_database.db?mode=ro',uri=True).execute('SELECT MAX(snapshot_date) FROM options').fetchone()[0])")
+          gh release edit "$TAG" --notes "Raw per-contract options chains and daily closes collected by .github/workflows/daily-snapshot.yml — through session $NEWEST, updated $(date -u +%Y-%m-%dT%H:%MZ).
+
+          Replaced in place after every collection, so this download URL is stable:
+
+              https://github.com/${{ github.repository }}/releases/download/$TAG/schwab_database.db
+
+          This file used to be committed via Git LFS. LFS cannot delta-compress SQLite, so every push stored a complete new copy and the quota reached 9.01GB of an included 10GB with the daily growth rate unchanged. Release assets are not metered against that quota."
+
+          echo "Seeded session $NEWEST to $TAG"
+          echo "URL: https://github.com/${{ github.repository }}/releases/download/$TAG/schwab_database.db"
