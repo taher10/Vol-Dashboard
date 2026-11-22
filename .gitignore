@@ -36,11 +36,18 @@ env/
 # macOS
 .DS_Store
 
-# Local-only databases. database/schwab_database.db itself is TRACKED (the
-# daily workflow commits it), so listing it here would do nothing -- .gitignore
-# only applies to untracked files. Instead, point a local dev session at one of
-# these paths via SCHWAB_DB_PATH so live refreshes never dirty the committed
-# file and block the next pull:
+# The raw chain database. Untracked since 2026-11-22: Git LFS stores a
+# complete new copy of a SQLite file on every push, which took the quota to
+# 9.01GB of an included 10GB while the daily growth rate never changed. It
+# is published as a release asset instead and fetched with
+# `python -m src.chain_release download` -- see that module for the whole
+# story. Ignored rather than merely deleted so a stray `git add` cannot put
+# 658MB back into the repository.
+database/schwab_database.db
+database/schwab_database.db.download
+
+# Local-only databases. Point a local dev session at one of these via
+# SCHWAB_DB_PATH so a live refresh never writes over the downloaded copy:
 #
 #   export SCHWAB_DB_PATH=database/local.db
 #
@@ -48,9 +55,9 @@ database/local*.db
 database/*.local.db
 demo-data/
 
-# Backups written by src/backfill_session_dates.py --apply. ~410MB each and
-# NOT LFS-tracked (the filter matches the exact database paths, not these),
-# so an accidental `git add` would put 410MB of binary into git proper --
-# painful to undo. They are your undo for the relabelling; delete them once
-# the result is verified and pushed.
+# Backups written by src/backfill_session_dates.py --apply. ~658MB each, so
+# an accidental `git add` would put 658MB of binary into git proper --
+# painful to undo, and nothing in this repo is LFS-tracked any more to
+# soften it. They are your undo for the relabelling; delete them once the
+# result is verified and published.
 *.pre-backfill

@@ -205,8 +205,9 @@ class TestChainConsistency:
         assert "disagree" in problems[0]
 
     def test_missing_or_unreadable_chain_db_does_not_fail_the_run(self):
-        """Coverage checking must survive a chain DB that isn't there -- it's
-        LFS-tracked and large, and a missing one is not a data-collection
+        """Coverage checking must survive a chain DB that isn't there. It
+        is a 658MB release asset that most jobs never download, so absent is
+        its normal state almost everywhere -- and not a data-collection
         failure."""
         class Exploding:
             def snapshot_symbol_counts(self, limit=8):
@@ -222,11 +223,15 @@ class TestChainConsistency:
 
 
 class TestChainDbOpening:
-    """database/schwab_database.db is 172MB and LFS-tracked. A checkout
-    without `lfs: true` leaves a ~130-byte pointer at that path, and opening
-    it as SQLite raises "file is not a database" -- which took down the
-    2026-09-15 validation run when the cross-check was added to a workflow
-    that deliberately skips LFS."""
+    """database/schwab_database.db is 658MB and lives outside the repository
+    as a release asset, so a job that did not download it finds nothing at
+    that path. Until 2026-11-22 the equivalent state was an unfetched Git
+    LFS pointer, which SQLite opens and rejects with "file is not a
+    database" -- that took down the 2026-09-15 validation run when the
+    cross-check was added to a workflow deliberately skipping LFS. The
+    pointer bytes are kept below because they are a real thing that was
+    really on disk, and because a half-finished download looks much the
+    same to sqlite3."""
 
     def test_lfs_pointer_is_reported_not_raised(self, tmp_path, monkeypatch):
         pointer = tmp_path / "schwab_database.db"

@@ -20,10 +20,16 @@ Why this exists, and how it differs from the other two stores
   price charting) have real history to work with instead of only today's
   snapshot.
 
-This is deliberately committed to git (like history/vol_history.db), not
-gitignored -- see README's "Web app" section for the size-growth tradeoff
-that comes with that choice for a table this much larger than
-metric_history's.
+This file is NOT in the repository. It was committed until 2026-08-14,
+then Git LFS-tracked until 2026-11-22, and is now published as a release
+asset on the fixed tag `chain-latest` -- see src/chain_release.py for the
+whole story. The short version: LFS cannot delta-compress a SQLite file,
+so every nightly push stored a complete new copy, and the quota reached
+9.01GB of an included 10GB while the daily growth rate never changed.
+
+history/vol_history.db IS still committed. It holds compact per-expiry
+metrics (~16 rows/symbol/day against this table's 1,000+) and is 2.6MB,
+so it stays an ordinary git object.
 
 Usage
 -----
@@ -179,15 +185,16 @@ def resolve_db_path(db_path: Path | str | None = None) -> Path:
 
     Callers that only need the path -- a cache fingerprint, a log line --
     must not have to construct a SchwabDatabase, because the constructor
-    opens the file and runs DDL against it. Under CI that file is an
-    unfetched Git LFS pointer, so merely asking where it is raised
-    "file is not a database" and took the whole suite down.
+    opens the file and runs DDL against it. Under CI that file is absent,
+    and before 2026-11-22 it was an unfetched Git LFS pointer, so merely
+    asking where it is raised "file is not a database" and took the whole
+    suite down.
 
     SCHWAB_DB_PATH lets a local dev session write somewhere other than the
-    committed database. That file is tracked and the daily workflow commits
-    a new ~390MB version of it every night, so any local write leaves the
-    working tree dirty and blocks the next `git pull` with "local changes
-    would be overwritten". .gitignore cannot help: it only applies to
+    downloaded database, so a live refresh cannot overwrite the copy the
+    pipeline published. It used to be tracked, and a local write then left
+    the working tree dirty and blocked the next `git pull` with "local
+    changes would be overwritten". .gitignore cannot help: it only applies to
     untracked files, and this one is tracked.
 
     Read per call rather than captured at import, so a test or a shell that

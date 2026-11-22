@@ -15,9 +15,10 @@
 # The database
 # ------------
 # The demo serves a frozen snapshot built by `python -m src.build_demo_db`.
-# It is NOT in the repo: the live chain database is ~450MB in Git LFS, and
-# pulling that on every deploy would be slow and pointless when the demo
-# only needs five days of it.
+# It is NOT in the repo: the live chain database is ~658MB and is itself a
+# release asset (tag `chain-latest`, see src/chain_release.py), and pulling
+# that on every deploy would be slow and pointless when the demo only needs
+# five days of a simulated market.
 #
 # .github/workflows/publish-demo.yml republishes it weekly to a release with
 # the FIXED tag `demo-latest`, so this URL never changes and DEMO_DB_URL is

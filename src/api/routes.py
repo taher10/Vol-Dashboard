@@ -226,8 +226,10 @@ def _data_fingerprint() -> tuple[float, float]:
 
     # resolve_db_path rather than _db().db_path: the latter constructs a
     # SchwabDatabase, which opens the file and runs DDL. Under CI that file
-    # is an unfetched LFS pointer, so asking a cache where its data lives
-    # was enough to fail the suite with "file is not a database".
+    # is absent -- it is a release asset nothing in the tests workflow
+    # downloads -- and before 2026-11-22 it was an unfetched LFS pointer,
+    # so asking a cache where its data lives was enough to fail the suite
+    # with "file is not a database".
     return mtime(resolve_db_path()), mtime(_history_store.db_path)
 
 
@@ -1458,12 +1460,12 @@ def _db() -> SchwabDatabase:
 
     This was a module-level `_schwab_db = SchwabDatabase()`, which meant
     importing this module opened database/schwab_database.db and executed
-    DDL against it. In CI that file is an unfetched Git LFS pointer (the
-    tests workflow deliberately does not fetch LFS -- 260MB per run would
-    drain the monthly quota), so `import src.api.routes` raised
-    "file is not a database" and every API test errored during collection.
-    Importing a module should not open a quarter-gigabyte file, let alone
-    require one to exist.
+    DDL against it. In CI that file is not there at all -- it is a 658MB
+    release asset the tests workflow has no reason to download (see
+    src/chain_release.py), and before 2026-11-22 it was an unfetched Git
+    LFS pointer -- so `import src.api.routes` raised "file is not a
+    database" and every API test errored during collection. Importing a
+    module should not open a 658MB file, let alone require one to exist.
     """
     return _db_at(os.environ.get("SCHWAB_DB_PATH"))
 

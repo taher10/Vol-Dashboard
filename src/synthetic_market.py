@@ -8,7 +8,9 @@ Why this exists
 The dashboard is worth showing to people, and the data it runs on is not
 ours to publish. Those two facts used to be in direct conflict: the public
 demo served a database of real Schwab chains, and the repository carried
-1.6 million real contracts in Git LFS where anyone could clone them.
+1.6 million real contracts in Git LFS where anyone could clone them. (That
+database is a release asset rather than an LFS object since 2026-11-22;
+the demo's independence from it is unaffected, which is the point.)
 
 Generating the market removes the conflict rather than managing it. There
 is no redistribution question about numbers that came out of a random

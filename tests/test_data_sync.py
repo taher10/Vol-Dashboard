@@ -19,6 +19,10 @@ import pytest
 
 from src.dashboard import data_sync
 
+# Captured before the autouse stub below can replace it, so TestRefreshChain
+# can put the real implementation back for the tests that are about it.
+_REAL_REFRESH_CHAIN = data_sync._refresh_chain
+
 
 @pytest.fixture
 def git_calls(monkeypatch):
@@ -35,6 +39,17 @@ def git_calls(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     return calls, scripted
+
+
+@pytest.fixture(autouse=True)
+def _no_real_chain_fetch(monkeypatch):
+    """Keep pull_latest's git logic separable from the asset download.
+
+    pull_latest now does two things -- fast-forward the metric history and
+    fetch the chain database -- and the tests in this file are about the
+    first. _refresh_chain is exercised directly in TestRefreshChain below.
+    """
+    monkeypatch.setattr(data_sync, "_refresh_chain", lambda: data_sync._ChainOutcome(changed=False))
 
 
 def _ok(stdout=""):
@@ -78,22 +93,35 @@ class TestRefusesToClobberLocalData:
     def test_dirty_database_blocks_the_pull(self, git_calls, monkeypatch):
         calls, scripted = git_calls
         monkeypatch.setattr(
-            data_sync, "dirty_tracked_data", lambda: ["database/schwab_database.db"]
+            data_sync, "dirty_tracked_data", lambda: ["history/vol_history.db"]
         )
 
         result = data_sync.pull_latest()
 
         assert result.changed is False
-        assert "schwab_database.db" in result.message
+        assert "vol_history.db" in result.message
         assert not any(c[1] == "pull" for c in calls), "must not pull over local changes"
 
     def test_dirty_detection_reads_porcelain_for_the_data_files(self, git_calls):
         calls, scripted = git_calls
-        scripted[("status", "--porcelain")] = _ok(" M database/schwab_database.db\n")
+        scripted[("status", "--porcelain")] = _ok(" M history/vol_history.db\n")
 
-        assert data_sync.dirty_tracked_data() == ["database/schwab_database.db"]
+        assert data_sync.dirty_tracked_data() == ["history/vol_history.db"]
         status = next(c for c in calls if c[1] == "status")
-        assert "database/schwab_database.db" in status
+        assert "history/vol_history.db" in status
+
+    def test_the_chain_database_is_not_guarded_because_it_is_not_tracked(self):
+        """It left Git LFS for a release asset on 2026-11-22, so git can
+        neither report it dirty nor overwrite it.
+
+        This is not a loosened safeguard. Listing it here was what made the
+        Sync button refuse to run from a checkout whose chain database
+        differed from origin/main at all -- which, on a feature branch, is
+        always. chain_release.download() now carries the protection that
+        matters, by refusing an asset holding fewer rows than the local
+        copy."""
+        assert "database/schwab_database.db" not in data_sync._TRACKED_DATA
+        assert data_sync._TRACKED_DATA == ("history/vol_history.db",)
 
 
 class TestOutcomesAreReportedNotRaised:
@@ -266,7 +294,7 @@ class TestUpstreamStatusAnswers:
         state that made a Sync button appear broken.
         """
         _, scripted = git_calls
-        scripted[("status", "--porcelain")] = _ok(" M database/schwab_database.db\n")
+        scripted[("status", "--porcelain")] = _ok(" M history/vol_history.db\n")
         scripted[("ls-remote", "origin")] = _ok(f"{_REMOTE}\trefs/heads/main\n")
         scripted[("rev-parse", "HEAD")] = _ok(f"{_LOCAL}\n")
         scripted[("cat-file", "-e")] = _ok()
@@ -274,7 +302,7 @@ class TestUpstreamStatusAnswers:
 
         status = data_sync.upstream_status()
 
-        assert status.dirty == ["database/schwab_database.db"]
+        assert status.dirty == ["history/vol_history.db"]
         assert status.has_updates is True
 
 
@@ -358,3 +386,94 @@ class TestUpstreamStatusCaching:
         assert len([c for c in calls if c[1] == "ls-remote"]) == 2, (
             "pull should have invalidated the cached answer"
         )
+
+
+class TestRefreshChain:
+    """The half of a sync that is no longer a git operation.
+
+    The chain database left Git LFS for a release asset on 2026-11-22, so
+    "show me what the pipeline collected" is now a pull plus a download.
+    """
+
+    @pytest.fixture
+    def chain(self, monkeypatch, tmp_path):
+        """A fake asset and a local file, with the sizes under test control."""
+        from src import chain_release
+
+        local = tmp_path / "schwab_database.db"
+        monkeypatch.setattr(data_sync, "_refresh_chain", _REAL_REFRESH_CHAIN)
+        monkeypatch.setattr(data_sync, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(data_sync, "_CHAIN_DB", "schwab_database.db")
+        return local, chain_release
+
+    def test_an_unchanged_size_skips_the_download(self, chain, monkeypatch):
+        """The chain table only ever grows, so equal sizes mean there is
+        nothing new -- and this is a ~658MB transfer not to start twice."""
+        local, chain_release = chain
+        local.write_bytes(b"x" * 1234)
+        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 1234)
+        monkeypatch.setattr(chain_release, "download", _must_not_run)
+
+        assert data_sync._refresh_chain() == data_sync._ChainOutcome(changed=False)
+
+    def test_a_different_size_downloads(self, chain, monkeypatch):
+        local, chain_release = chain
+        local.write_bytes(b"x" * 1234)
+        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 9999)
+        monkeypatch.setattr(chain_release, "download", lambda *a, **k: 9999)
+
+        assert data_sync._refresh_chain().changed is True
+
+    def test_a_missing_local_file_downloads(self, chain, monkeypatch):
+        """A fresh checkout has no database at all -- that is the one case
+        where the download is certainly needed."""
+        _, chain_release = chain
+        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 1234)
+        monkeypatch.setattr(chain_release, "download", lambda *a, **k: 1234)
+
+        assert data_sync._refresh_chain().changed is True
+
+    def test_an_unknowable_remote_size_downloads(self, chain, monkeypatch):
+        """Every uncertainty resolves toward downloading. Being wrong about
+        "nothing changed" is silent and persists; being wrong the other way
+        costs one transfer."""
+        local, chain_release = chain
+        local.write_bytes(b"x" * 1234)
+        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: None)
+        monkeypatch.setattr(chain_release, "download", lambda *a, **k: 1234)
+
+        assert data_sync._refresh_chain().changed is True
+
+    def test_a_failed_download_is_reported_not_raised(self, chain, monkeypatch):
+        """The history pull may well have succeeded. "Most of your data
+        arrived" is a different message from "sync failed"."""
+        local, chain_release = chain
+        local.write_bytes(b"x" * 1234)
+        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 9999)
+
+        def boom(*a, **k):
+            raise chain_release.ChainDownloadError("404, no asset on that tag")
+
+        monkeypatch.setattr(chain_release, "download", boom)
+
+        outcome = data_sync._refresh_chain()
+
+        assert outcome.changed is False
+        assert "404" in outcome.note
+
+    def test_pull_latest_surfaces_the_chain_failure(self, git_calls, monkeypatch):
+        """A sync that moved the history but not the chain must not read as
+        an unqualified success."""
+        _, scripted = git_calls
+        scripted[("rev-parse", "--short")] = _ok("abc1234\n")
+        monkeypatch.setattr(
+            data_sync,
+            "_refresh_chain",
+            lambda: data_sync._ChainOutcome(changed=False, note="the chain database did not update (404)"),
+        )
+
+        assert "404" in data_sync.pull_latest().message
+
+
+def _must_not_run(*args, **kwargs):
+    raise AssertionError("download() must not be called when the sizes already match")

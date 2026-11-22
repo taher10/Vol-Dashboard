@@ -138,24 +138,31 @@ def _depth_problems(symbol: str, stats: list[dict], thin_fraction: float) -> lis
 def open_chain_db() -> tuple["SchwabDatabase | None", str | None]:
     """Open the raw chain database, or explain why it couldn't be.
 
-    database/schwab_database.db is ~390MB and Git LFS-tracked. A checkout
-    without `lfs: true` leaves a ~130-byte pointer file at that path, and
-    opening it raises `sqlite3.DatabaseError: file is not a database` -- which
-    is exactly how the 2026-09-15 validation run died once this cross-check
-    was added to a workflow that deliberately skips LFS.
+    database/schwab_database.db is ~658MB and is not in the repository at
+    all -- it is published as a release asset and downloaded by whichever
+    job needs it (see src/chain_release.py). Most jobs do not: there is no
+    reason to pull 658MB a job never opens. So this cross-check runs where
+    the file is already on disk (the snapshot job, which downloads it to
+    append to) and reports itself skipped everywhere else.
 
-    Pulling LFS on a daily job isn't the answer either -- not for the cost
-    (the billing page on 2026-10-15 showed 10GB included and 0GB metered,
-    so the 1GB/month figure this once cited was simply wrong) but because
-    there is no reason to download ~390MB a job never opens. So
-    the cross-check runs where the file already exists (the snapshot job,
-    which must fetch LFS to write it) and reports itself skipped elsewhere.
+    Until 2026-11-22 the file was Git LFS-tracked, and the failure this
+    guards looked different: a checkout without `lfs: true` left a
+    ~134-byte pointer at that path and opening it raised
+    `sqlite3.DatabaseError: file is not a database`, which is how the
+    2026-09-15 validation run died once this cross-check was added to a
+    workflow that deliberately skipped LFS. Same shape, new cause -- a
+    missing download instead of a missing pointer -- so the handling is
+    unchanged and only the explanation moved.
+
     Returns (db, None) on success, (None, reason) otherwise.
     """
     try:
         return SchwabDatabase(), None
     except sqlite3.DatabaseError as exc:
-        return None, f"raw chain database is not readable ({exc}) -- likely an LFS pointer from a no-LFS checkout"
+        return None, (
+            f"raw chain database is not readable ({exc}) -- it is a release asset, so this "
+            "is most likely a job that did not download it"
+        )
     except Exception as exc:  # noqa: BLE001 -- never let an optional input fail the coverage check
         return None, f"raw chain database unavailable ({type(exc).__name__}: {exc})"
 

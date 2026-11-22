@@ -92,12 +92,13 @@ class TestCachesAgainstTheData:
 
 class TestFingerprint:
     def test_tracks_both_databases(self, tmp_path, monkeypatch):
-        """Points at temp files rather than the committed ones. The real
-        chain database is an unfetched Git LFS pointer under CI, and the
-        first version of this test constructed a SchwabDatabase to find its
-        path -- which opens it, and failed with "file is not a database".
-        resolve_db_path exists so asking where the data lives never opens
-        it."""
+        """Points at temp files rather than the real ones. The chain
+        database is absent under CI -- it is a release asset nothing in the
+        tests workflow downloads, and before 2026-11-22 it was an unfetched
+        Git LFS pointer. The first version of this test constructed a
+        SchwabDatabase to find its path, which opens the file, and failed
+        with "file is not a database". resolve_db_path exists so asking
+        where the data lives never opens it."""
         chain = tmp_path / "chain.db"
         history = tmp_path / "history.db"
         chain.write_bytes(b"x")

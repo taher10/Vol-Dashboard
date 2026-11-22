@@ -21,7 +21,9 @@ for j in json.load(sys.stdin)['jobs']:
 
 - Failed at **`Run daily snapshot`** → two possibilities, and the run summary tells them apart. If the per-symbol failure detail says `invalid_grant` / "Refresh token is invalid", it's an expired refresh token (section below). If *every* symbol failed with the same non-auth error, it's almost certainly a dependency drift — see "An unrelated dependency can break the Schwab pipeline" below, and don't touch the token.
 - Failed at **`Restore token.json from secret`** → the `SCHWAB_TOKEN_B64` secret itself is unusable (empty, malformed base64, or not JSON). See the section below that.
-- Failed at **`Commit history if it changed`** → repo size / Git LFS. See further below.
+- Failed at **`Download the chain database`** → the `chain-latest` release asset is missing or unreachable. The job stops here on purpose: appending to an empty database and publishing that would replace every collected session. See "The chain database is a release asset" below.
+- Failed at **`Commit history if it changed`** → repo size. `history/vol_history.db` is 2.6MB and ordinary, so this is now rare; it used to mean Git LFS. See further below.
+- Failed at **`Publish the chain database`** → the day's chains could not be saved. Read the message: it distinguishes "no baseline" (the download step never finished) from "fewer rows than we started with" (the database was reset or truncated mid-run). Both are refusals, not crashes.
 
 ---
 
@@ -77,15 +79,32 @@ If this recurs a 4th time, the real fix is probably to stop relying on manual co
 
 ---
 
-## Repo size / Git LFS for `database/schwab_database.db`
+## The chain database is a release asset, not a file in the repo
 
-**Recurred: 1 time (so far).**
+**Recurred: 3 times, each time as a different-looking failure.**
 
-**What it looks like:** the daily-snapshot workflow's "Commit history if it changed" step fails, even though the actual data-fetch step succeeded for every symbol.
+**The history, because the shape repeats and the explanations kept being wrong:**
 
-**Why it happens:** `database/schwab_database.db` grows ~13-14MB/day (raw per-contract options chain data accumulating). It crossed GitHub's 100MB per-file push limit.
+| When | State | What broke |
+|---|---|---|
+| 2026-08-14 | committed to git | crossed the 100MB per-file push limit; "Commit history" failed silently while fetch and token steps passed |
+| 2026-08-20 | moved to Git LFS | fixed that. Comment claimed a "1GB/month" tier and "~10 weeks of runway" — **there is no such tier**; it is 10GB of storage |
+| 2026-10-15 | LFS, 1.8GB used | read as comfort, and the comment was rewritten to say LFS was *not* the near-term constraint |
+| 2026-11-19 | LFS, 9.01GB of 10GB | one run from a hard stop |
+| 2026-11-22 | release asset, tag `chain-latest` | LFS usage frozen |
 
-**The fix:** the file is now tracked via Git LFS (`.gitattributes`), which was the actual fix applied. GitHub's free LFS tier is 1GB storage/bandwidth per month — at the growth rate above, that's roughly 10 weeks of runway before this needs revisiting (either a retention window that prunes old raw snapshots, or a paid LFS data pack). If this recurs, check LFS usage/quota first before assuming it's a new problem.
+**Why it kept being misread:** LFS cannot delta-compress a SQLite file, so **every push stores a complete new copy**. 58 commits × a file growing to 658MB = 9GB, with the daily growth rate (12.2MB/session) never once changing. Storage is a **stock, not a flow** — it does not reset monthly, and deleting branches or rewriting history does not reclaim it. Anyone reasoning from "how fast does the file grow" gets a number that is five times too small.
+
+With a `$0` Git LFS budget the overage is **refused rather than billed**, so the wall at 10GB is `git push` being rejected: data collected, then unsavable.
+
+**The arrangement now:** `database/schwab_database.db` is untracked and gitignored. `daily-snapshot.yml` downloads it from the `chain-latest` release at the start of a run, appends, and uploads it back with `--clobber`. `src/chain_release.py` owns both directions and refuses anything that is not plainly the database.
+
+**What to know before changing it:**
+- **Never let a job start from an empty database.** The download step fails loudly for this reason, and the publish step refuses when it has no baseline to compare against. One session published as the whole chain would overwrite every other.
+- **The 9.01GB of LFS is permanent.** GitHub will not release it without support intervention. Staying flat below 10GB is the goal, not getting it back.
+- **Pre-migration states are still recoverable** — the LFS objects remain in git history, so `git lfs pull` at an old commit works.
+- **The next ceiling is 2GB per asset**, about 114 sessions (~5.4 months from 2026-11-22). That is when a retention window stops being optional.
+- Check `github.com/settings/billing/summary` before acting on any figure, including these.
 
 ---
 
@@ -160,36 +179,42 @@ Pay attention to packages present in CI and *absent* locally, not just version b
 sqlite3.DatabaseError: file is not a database
 ```
 
-**Why it happens:** that file is ~172MB and Git LFS-tracked. Only
-`daily-snapshot.yml` checks out with `lfs: true`, because it has to in order
-to write the file. Every other workflow deliberately does not: 172MB per run
-against the 1GB/month free bandwidth tier is under a week of runway, and
-exhausting LFS would take the snapshot job's commit step down with it. A
-checkout without LFS leaves a ~130-byte pointer at that path, and opening it
-as SQLite raises the error above.
+**Why it happens:** that file is ~658MB and is not in the repository — it is
+a release asset. Only `daily-snapshot.yml` downloads it, because it has to in
+order to append to it. Every other workflow deliberately does not: there is
+no reason to fetch 658MB you will not open. So in every other job that path
+holds **nothing at all**.
+
+Before 2026-11-22 the file was Git LFS-tracked and the same mistake produced
+a ~134-byte pointer at that path instead, which SQLite opens and rejects with
+the error above. The cause changed; the rule did not.
 
 It has now caught the same person twice in a week -- first by adding the
 raw-chain cross-check to `data-validation.yml`, then by writing a unit test
 that constructed `SchwabDatabase()` on the default path.
 
 **The rule:** before any code path opens that database, ask which workflow
-runs it. If the answer is anything other than `daily-snapshot.yml`, it will
-see a pointer file.
+runs it. If the answer is anything other than `daily-snapshot.yml`, the file
+will not be there.
 
 - **Production code** should degrade, not crash -- see
   `validate_collection.open_chain_db()`, which returns `(db, reason)` and
   announces the skip loudly rather than swallowing it.
 - **Tests** should never touch it at all. Monkeypatch
   `src.schwab_database._DEFAULT_DB_PATH` to a `tmp_path`, or pass an explicit
-  `db_path`. A unit test has no business opening a 172MB tracked file even
-  when the file is real.
-- **Reproduce the CI condition in one line** rather than guessing:
+  `db_path`. A unit test has no business opening a 658MB file even when the
+  file is real. `tests/conftest.py` enforces this session-wide, and also
+  points `chain_release.ASSET_URL` somewhere unreachable so no test can
+  download the real asset over the network.
+- **Reproduce the CI condition in one line** rather than guessing. All three
+  states `tests/test_api_import.py` parametrises over are worth trying;
+  absent is the realistic one:
   ```bash
-  cp database/schwab_database.db /tmp/real.db
-  printf 'version https://git-lfs.github.com/spec/v1\noid sha256:x\nsize 1\n' > database/schwab_database.db
+  mv database/schwab_database.db /tmp/real.db     # absent -- what CI sees
   pytest            # or whatever the workflow runs
-  cp /tmp/real.db database/schwab_database.db
+  mv /tmp/real.db database/schwab_database.db
   ```
+- **Getting it back** after any of this: `python -m src.chain_release download`.
 
 ---
 

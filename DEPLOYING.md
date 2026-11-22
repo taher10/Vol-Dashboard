@@ -55,13 +55,15 @@ and the trailing z-scores need the long series to mean anything.
 
 ## 2. Publish it
 
-The database is **not** committed. The live chain database is ~260MB in Git
-LFS, and pulling LFS on every deploy would spend a quarter of the free
-monthly bandwidth each time.
+Neither database is committed. The live chain database is ~658MB and is
+itself a release asset (tag `chain-latest`, see `src/chain_release.py`) --
+and the demo should not serve it in any case, since it runs on a simulated
+market rather than real Schwab chains.
 
 Upload `demo-data/schwab_database.db` as a **GitHub Release asset** and copy
-its download URL. Release assets are free, do not touch LFS, and are simple
-to replace when you want the demo to show fresher data.
+its download URL. Release assets are free, are not metered against the Git
+LFS quota, and are simple to replace when you want the demo to show fresher
+data.
 
 ## 3. Backend on Render
 

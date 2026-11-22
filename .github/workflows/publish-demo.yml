@@ -60,12 +60,13 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     steps:
-      # No lfs: true. This used to be mandatory, because the build read the
-      # LFS-tracked chain database and an unfetched pointer is a ~130-byte
-      # text file that SQLite rejects with "file is not a database". The
-      # generator reads nothing, so the checkout no longer pulls ~500MB of
-      # real quotes on every run -- which also takes this workflow out of
-      # the repository's 10GB monthly LFS budget.
+      # No lfs: true, and since 2026-11-22 nothing in this repository is
+      # LFS-tracked at all -- the chain database is a release asset (see
+      # src/chain_release.py). This used to be mandatory, because the build
+      # read the LFS-tracked chain database and an unfetched pointer is a
+      # ~134-byte text file that SQLite rejects with "file is not a
+      # database". The generator reads nothing, so this workflow touches
+      # neither the asset nor any real quotes.
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
