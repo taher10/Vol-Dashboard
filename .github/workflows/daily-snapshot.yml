@@ -16,13 +16,30 @@ name: Daily vol snapshot
 # started silently failing at the final "Commit history" step (fetch/token
 # steps still succeeded, so this was easy to miss). Tracked via Git LFS
 # (.gitattributes) since 2026-08-20 to fix that; see actions/checkout's
-# `lfs: true` below. The LFS allowance was long assumed here to be 1GB/month
-# with "~10 weeks of runway"; the billing page on 2026-10-15 showed 10GB
-# included, 1.8GB of storage used and 0GB of bandwidth metered -- public-repo
-# discounts appear to absorb the daily fetch entirely. The file still grows
-# ~10MB/day, so a retention window is worth having eventually, but it is not
-# the near-term constraint this comment spent months claiming it was. Check
-# github.com/settings/billing before acting on any figure here. A live pull
+# `lfs: true` below.
+#
+# LFS IS THE NEAR-TERM CONSTRAINT -- earlier versions of this comment said
+# twice that it wasn't, and were wrong both times. The figures, so the next
+# reader can see the trend rather than one snapshot:
+#   2026-08-20  assumed 1GB/month, "~10 weeks of runway"  (wrong: it is 10GB
+#               of STORAGE, not a monthly bandwidth tier)
+#   2026-10-15  10GB included, 1.8GB used, 0GB metered    (read as comfort)
+#   2026-11-19  10GB included, 9.01GB used (90%)          (one run of room)
+#
+# What the two optimistic readings both missed: LFS cannot delta-compress a
+# SQLite file, so every push stores a COMPLETE NEW COPY. At 628MB/copy and 58
+# commits touching this file, the quota went to 9GB without the daily growth
+# rate ever changing. Storage is a stock, not a flow -- it does not reset on
+# the 1st, and deleting branches or rewriting history does not reclaim it.
+#
+# A $0 Git LFS budget means overage is refused rather than billed, so the
+# failure mode at 10GB is `git push` being REJECTED in "Commit history"
+# below -- data collected, then unsavable. The real fix is to stop committing
+# this file and publish it as a release asset instead (release storage is not
+# metered against the LFS quota, and old assets can actually be deleted).
+# Until that lands, assume every run is the one that hits the wall.
+# Check github.com/settings/billing/summary before acting on any figure here.
+# A live pull
 # with no usable quotes (outside market hours) raises LiveDataUnavailableError
 # and neither file gets touched that day -- see src/data_quality.py.
 #
@@ -52,6 +69,7 @@ on:
 
 permissions:
   contents: write # needed to commit history/vol_history.db back to the repo
+  issues: write # needed by "Open an issue on failure" below
 
 jobs:
   snapshot:
@@ -95,18 +113,24 @@ jobs:
           NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
         run: python -m src.daily_snapshot
 
-      # Runs even if the step above hit per-symbol failures -- schwab-py may
-      # still have refreshed the token in place before a later symbol failed
-      # for an unrelated reason, and that refreshed token is still worth
-      # keeping. Only truly skips work if SECRETS_PAT isn't configured (see
-      # src/token_sync.py).
-      - name: Persist refreshed token back to SCHWAB_TOKEN_B64
-        if: always()
-        env:
-          SECRETS_PAT: ${{ secrets.SECRETS_PAT }}
-        run: python -m src.token_sync
-
+      # if: always() and placed directly after collection, both deliberately.
+      #
+      # This step used to sit AFTER "Persist refreshed token" with no `if:`,
+      # which meant a token-sync failure skipped it -- the day's chains were
+      # collected into the runner's disk and then thrown away when the runner
+      # was destroyed. That is what happened on 2026-11-18 and 2026-11-19:
+      # twelve consecutive runs died on the token step, and because collection
+      # itself had succeeded every time, those sessions were discarded rather
+      # than missed. Schwab serves current chains only, so they are gone for
+      # good.
+      #
+      # Nothing downstream of collection can make already-collected data less
+      # worth keeping, so nothing downstream of collection gets to block the
+      # commit. A partial day is still better than no day -- "Validate what
+      # was collected" below exists to flag it, and the `git diff --staged
+      # --quiet ||` guard means a run that collected nothing commits nothing.
       - name: Commit history if it changed
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -142,16 +166,64 @@ jobs:
           echo "run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT, created $CREATED"
           python -m src.validate_collection --max-stale-days 3 --run-created-at "$CREATED"
 
-      # Fallback alert for failures src/daily_snapshot.py's own notify() call
-      # never got a chance to send -- e.g. "Restore token.json from secret"
-      # or "Install dependencies" failing before the Python pipeline even runs.
-      - name: Notify on workflow-level failure
+      # Runs even if the steps above failed -- schwab-py may still have
+      # refreshed the token in place before a later symbol failed for an
+      # unrelated reason, and that refreshed token is still worth keeping.
+      # Only truly skips work if SECRETS_PAT isn't configured (see
+      # src/token_sync.py).
+      #
+      # Deliberately LAST. The token on disk is written during collection and
+      # nothing after it touches token.json, so this step's position cannot
+      # affect which token gets persisted -- but when it ran second it could,
+      # and did, stop the commit below it from happening at all. A step that
+      # saves a credential for *tomorrow* must never outrank saving the data
+      # from *today*, because tomorrow's run can re-auth and today's session
+      # cannot be refetched.
+      - name: Persist refreshed token back to SCHWAB_TOKEN_B64
+        if: always()
+        env:
+          SECRETS_PAT: ${{ secrets.SECRETS_PAT }}
+        run: python -m src.token_sync
+
+      # Replaces a webhook POST guarded by `if [ -n "$NOTIFY_WEBHOOK_URL" ]`.
+      # NOTIFY_WEBHOOK_URL was never configured, so that step did nothing and
+      # exited 0 -- a green check on a step whose entire job was to raise the
+      # alarm. Twelve failed runs went unnoticed behind it.
+      #
+      # An issue needs no secret: github.token is injected automatically, so
+      # this cannot silently deactivate the way the webhook did. GitHub emails
+      # the repo owner on a new issue, and the open issue itself is a standing
+      # marker that the pipeline is down -- visible without opening the
+      # Actions tab.
+      #
+      # Comments on the existing open issue rather than filing a new one each
+      # night, so a week-long outage reads as one thread with seven entries
+      # instead of seven issues.
+      - name: Open an issue on failure
         if: failure()
         env:
-          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          TITLE: Daily snapshot pipeline is failing
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -n "$NOTIFY_WEBHOOK_URL" ]; then
-            curl -sS -X POST -H 'Content-Type: application/json' \
-              -d "{\"text\": \"Vol Dashboard: daily-snapshot workflow failed before/outside the per-symbol pipeline -- check the Actions run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\", \"content\": \"Vol Dashboard: daily-snapshot workflow failed before/outside the per-symbol pipeline -- check the Actions run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
-              "$NOTIFY_WEBHOOK_URL"
+          BODY=$(cat <<EOF
+          Run \`$GITHUB_RUN_ID\` (attempt $GITHUB_RUN_ATTEMPT) failed on $(date -u +%F).
+
+          The failing step is named in the run log: $RUN_URL
+
+          **This is time-sensitive.** Schwab serves current chains only, so a
+          re-run tomorrow collects tomorrow -- it cannot recover the session
+          this run was scheduled for. Every night this stays broken is a
+          permanent hole in \`history/vol_history.db\`.
+
+          Check which step failed before assuming the Schwab token is at
+          fault; see \`.claude/skills/vol-dashboard-development/references/known-issues.md\`.
+          EOF
+          )
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
           fi
