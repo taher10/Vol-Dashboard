@@ -1,10 +1,10 @@
 """
-The API must import without a usable chain database.
+The API must import without a usable chain store.
 
-database/schwab_database.db is ~658MB and is not in the repository. Since
-2026-11-22 it is a release asset that each job downloads if it needs it
-(see src/chain_release.py), and most do not -- so in CI that path usually
-holds NOTHING AT ALL.
+The chain store is not in the repository. Since 2026-11-22 it is a set of
+release assets that each job fetches if it needs them (see
+src/chain_release.py), and most do not -- so in CI that path usually holds
+NOTHING AT ALL.
 
 Before that it was Git LFS-tracked and the tests workflow skipped the
 fetch, so the path held a ~134-byte pointer instead, which SQLite opens and
@@ -19,7 +19,7 @@ during collection, and the failure pointed at sqlite rather than at the
 import, which is a slow thing to diagnose -- it had already cost this
 project two separate incidents before this test existed.
 
-Importing a module should not open a 658MB file, let alone require one to
+Importing a module should not open the archive, let alone require it to
 exist. These tests pin that.
 """
 

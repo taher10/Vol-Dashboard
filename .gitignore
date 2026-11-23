@@ -36,15 +36,29 @@ env/
 # macOS
 .DS_Store
 
-# The raw chain database. Untracked since 2026-11-22: Git LFS stores a
-# complete new copy of a SQLite file on every push, which took the quota to
-# 9.01GB of an included 10GB while the daily growth rate never changed. It
-# is published as a release asset instead and fetched with
-# `python -m src.chain_release download` -- see that module for the whole
-# story. Ignored rather than merely deleted so a stray `git add` cannot put
-# 658MB back into the repository.
+# The raw chain store. Untracked since 2026-11-22: Git LFS stores a complete
+# new copy of a SQLite file on every push, which took the quota to 9.01GB of
+# an included 10GB while the daily growth rate never changed. It is published
+# as release assets instead and fetched with `python -m src.chain_release
+# sync` -- see that module for the whole story.
+#
+# Two paths, because the store is two things: a small index file holding the
+# prices and the record of which dates exist, and a directory of compressed
+# monthly chain partitions beside it. Ignoring only the first would leave
+# `git status` offering to commit the chains a month at a time.
+#
+# Ignored rather than merely deleted so a stray `git add` cannot put any of
+# it back into the repository. Nothing here is LFS-tracked any more, so
+# there would be nothing to soften a mistake.
 database/schwab_database.db
-database/schwab_database.db.download
+database/schwab_database_chains/
+database/*.partitioned.db
+database/*.partitioned_chains/
+
+# Temporary files from an interrupted fetch. src/chain_release.py writes
+# beside the destination -- os.replace() is only atomic within one
+# filesystem -- and unlinks on failure, but a killed process leaves one.
+*.db.download
 
 # Local-only databases. Point a local dev session at one of these via
 # SCHWAB_DB_PATH so a live refresh never writes over the downloaded copy:
@@ -55,9 +69,10 @@ database/local*.db
 database/*.local.db
 demo-data/
 
-# Backups written by src/backfill_session_dates.py --apply. ~658MB each, so
-# an accidental `git add` would put 658MB of binary into git proper --
-# painful to undo, and nothing in this repo is LFS-tracked any more to
-# soften it. They are your undo for the relabelling; delete them once the
-# result is verified and published.
+# Backups written by src/backfill_session_dates.py --apply. ~52MB of store
+# plus the metric history, so an accidental `git add` would put a lot of
+# binary into git proper -- painful to undo, and nothing in this repo is
+# LFS-tracked any more to soften it. They are your undo for the
+# relabelling; delete them once the result is verified and published.
 *.pre-backfill
+*.pre-backfill_chains/

@@ -21,7 +21,7 @@ for j in json.load(sys.stdin)['jobs']:
 
 - Failed at **`Run daily snapshot`** → two possibilities, and the run summary tells them apart. If the per-symbol failure detail says `invalid_grant` / "Refresh token is invalid", it's an expired refresh token (section below). If *every* symbol failed with the same non-auth error, it's almost certainly a dependency drift — see "An unrelated dependency can break the Schwab pipeline" below, and don't touch the token.
 - Failed at **`Restore token.json from secret`** → the `SCHWAB_TOKEN_B64` secret itself is unusable (empty, malformed base64, or not JSON). See the section below that.
-- Failed at **`Download the chain database`** → the `chain-latest` release asset is missing or unreachable. The job stops here on purpose: appending to an empty database and publishing that would replace every collected session. See "The chain database is a release asset" below.
+- Failed at **`Fetch the chain store`** → the `chain-latest` release assets are missing or unreachable, or the release still holds the pre-migration single-table database. The job stops here on purpose: appending to an empty store and publishing that would replace every collected session. See "The chain store" below.
 - Failed at **`Commit history if it changed`** → repo size. `history/vol_history.db` is 2.6MB and ordinary, so this is now rare; it used to mean Git LFS. See further below.
 - Failed at **`Publish the chain database`** → the day's chains could not be saved. Read the message: it distinguishes "no baseline" (the download step never finished) from "fewer rows than we started with" (the database was reset or truncated mid-run). Both are refusals, not crashes.
 
@@ -79,9 +79,9 @@ If this recurs a 4th time, the real fix is probably to stop relying on manual co
 
 ---
 
-## The chain database is a release asset, not a file in the repo
+## The chain store: compressed monthly partitions published as release assets
 
-**Recurred: 3 times, each time as a different-looking failure.**
+**Recurred: 4 times, each time as a different-looking failure.**
 
 **The history, because the shape repeats and the explanations kept being wrong:**
 
@@ -91,19 +91,45 @@ If this recurs a 4th time, the real fix is probably to stop relying on manual co
 | 2026-08-20 | moved to Git LFS | fixed that. Comment claimed a "1GB/month" tier and "~10 weeks of runway" — **there is no such tier**; it is 10GB of storage |
 | 2026-10-15 | LFS, 1.8GB used | read as comfort, and the comment was rewritten to say LFS was *not* the near-term constraint |
 | 2026-11-19 | LFS, 9.01GB of 10GB | one run from a hard stop |
-| 2026-11-22 | release asset, tag `chain-latest` | LFS usage frozen |
+| 2026-11-22 | release asset, tag `chain-latest` | LFS usage frozen — but the next ceiling was **2GB per asset**, ~114 sessions, ~5.4 months. A known future wall is not a fix |
+| 2026-11-22 | compressed monthly partitions | 658MB → 52MB (12.6x). Nothing left with a ceiling that arrives |
 
 **Why it kept being misread:** LFS cannot delta-compress a SQLite file, so **every push stores a complete new copy**. 58 commits × a file growing to 658MB = 9GB, with the daily growth rate (12.2MB/session) never once changing. Storage is a **stock, not a flow** — it does not reset monthly, and deleting branches or rewriting history does not reclaim it. Anyone reasoning from "how fast does the file grow" gets a number that is five times too small.
 
 With a `$0` Git LFS budget the overage is **refused rather than billed**, so the wall at 10GB is `git push` being rejected: data collected, then unsavable.
 
-**The arrangement now:** `database/schwab_database.db` is untracked and gitignored. `daily-snapshot.yml` downloads it from the `chain-latest` release at the start of a run, appends, and uploads it back with `--clobber`. `src/chain_release.py` owns both directions and refuses anything that is not plainly the database.
+**Why moving it was not enough.** The release-asset migration was correct and insufficient: it replaced a wall at 10GB of LFS with a wall at 2GB per asset, about 5.4 months out. Building on storage whose failure date you can calculate is the thing to avoid, not the particular date.
+
+**What actually made the growth sustainable.** Three findings, all from measuring rather than guessing:
+
+- **36% of the 658MB was index.** `idx_options_symbol_date` duplicated the primary key's own leading columns outright. `idx_options_contract` cost 80MB to serve one endpoint the frontend has never called.
+- **`symbol`, `snapshot_date` and `option_type` were repeated strings** on every one of 2,042,262 rows.
+- **Every read was `WHERE symbol = ? AND snapshot_date = ?`** returning a whole DataFrame. The table paid full relational cost for a key-value access pattern.
+
+So a chain is now one compressed blob per `(symbol, snapshot_date)`, keyed the way it is read. `src/chain_codec.py` has the format and the numbers: **13.5x smaller, and 2.8ms to decode a chain against 6.3ms for the SELECT it replaced.** Faster *and* smaller, because there is no row materialization and no index descent.
+
+**The arrangement now:**
+
+```
+database/schwab_database.db           ~1MB    chain_index + stock_prices + precomputed_metrics
+database/schwab_database_chains/
+    2026-07.db ... 2026-11.db         ~10MB each, one per calendar month
+```
+
+Both untracked and gitignored. Published on the `chain-latest` release as `schwab_database.db` plus `chains-YYYY-MM.db`. `daily-snapshot.yml` fetches **the two newest partitions** (`sync --newest 2`), appends, and uploads what it holds. `src/chain_release.py` owns both directions.
+
+**Nothing here has a ceiling that arrives:** a month's partition is bounded by the length of a month; the asset count grows by twelve a year against no meaningful limit; a nightly run moves ~30MB whatever year it is.
 
 **What to know before changing it:**
-- **Never let a job start from an empty database.** The download step fails loudly for this reason, and the publish step refuses when it has no baseline to compare against. One session published as the whole chain would overwrite every other.
+- **The index is derived, never the record.** `rebuild_index()` reconstructs it from the partitions, which is why a corrupt 1MB file costs a scan instead of orphaning every chain behind it.
+- **Never call `rebuild_index()` on a partial store.** It derives the index from the partitions *present*, so a CI run holding two months would rebuild an index describing two months — and publishing that over one describing five erases the only record of the rest. `SchwabDatabase` heals an index that is *empty*, never one that is merely partial. This is also why the index file is published rather than regenerated on arrival.
+- **Never let a job start from an empty store.** The fetch step fails loudly, `sync` refuses when it cannot *list* the release (so "could not find out" never resolves to "nothing exists"), and the publish step refuses without a baseline to compare against.
+- **Nothing may shrink during a run.** `chain_release baseline` is taken right after the fetch; `check --baseline` refuses any count that went down, per partition and for the index. Exit 3 means "consistent, nothing collected" — a run outside market hours — and leaves the release alone.
+- **The storage format must stay exact, not merely close.** pandas' JSON round-trip returns `0.30000000000000004` for a stored `0.3` and corrupts 9 of 17 numeric columns. Schwab serves current chains only, so there is nothing to recompute from. `_encode_frame` in `schwab_database.py` still uses JSON and that is fine *only* for `precomputed_metrics`, which is derived.
+- **The migration is verified slice-by-slice, not sampled.** All 1,177 chains / 2,042,262 rows compared under `assert_frame_equal(check_exact=True, check_dtype=True)`. Keep that bar for any future format change.
+- **`contract_history` is the one read the layout does not favour** — it crosses every date instead of selecting one, so it decodes each of a symbol's chains. That is the trade for dropping the 80MB index, and it is well under a second.
 - **The 9.01GB of LFS is permanent.** GitHub will not release it without support intervention. Staying flat below 10GB is the goal, not getting it back.
 - **Pre-migration states are still recoverable** — the LFS objects remain in git history, so `git lfs pull` at an old commit works.
-- **The next ceiling is 2GB per asset**, about 114 sessions (~5.4 months from 2026-11-22). That is when a retention window stops being optional.
 - Check `github.com/settings/billing/summary` before acting on any figure, including these.
 
 ---
@@ -179,10 +205,10 @@ Pay attention to packages present in CI and *absent* locally, not just version b
 sqlite3.DatabaseError: file is not a database
 ```
 
-**Why it happens:** that file is ~658MB and is not in the repository — it is
-a release asset. Only `daily-snapshot.yml` downloads it, because it has to in
+**Why it happens:** the chain store is not in the repository — it is a set of
+release assets. Only `daily-snapshot.yml` fetches it, because it has to in
 order to append to it. Every other workflow deliberately does not: there is
-no reason to fetch 658MB you will not open. So in every other job that path
+no reason to fetch an archive you will not open. So in every other job that path
 holds **nothing at all**.
 
 Before 2026-11-22 the file was Git LFS-tracked and the same mistake produced
@@ -202,7 +228,7 @@ will not be there.
   announces the skip loudly rather than swallowing it.
 - **Tests** should never touch it at all. Monkeypatch
   `src.schwab_database._DEFAULT_DB_PATH` to a `tmp_path`, or pass an explicit
-  `db_path`. A unit test has no business opening a 658MB file even when the
+  `db_path`. A unit test has no business opening the real archive even when the
   file is real. `tests/conftest.py` enforces this session-wide, and also
   points `chain_release.ASSET_URL` somewhere unreachable so no test can
   download the real asset over the network.

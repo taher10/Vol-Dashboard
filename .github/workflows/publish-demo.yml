@@ -85,26 +85,44 @@ jobs:
       # deterministic, so a failure means the model or the schema changed
       # under it -- better to leave the demo on last week's good build than
       # replace it with a bad one.
+      # Read through SchwabDatabase rather than with raw SQL. Since
+      # 2026-11-22 the chains are compressed blobs in monthly partitions
+      # beside this file, not rows in an `options` table here -- see
+      # src/schwab_database.py -- so a hand-written query against that table
+      # would now fail, and a query that merely counted index rows would not
+      # prove a single chain is readable.
       - name: Verify what was built
         run: |
           python - <<'PY'
           import sqlite3, sys
-          db = "demo-data/schwab_database.db"
-          c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-          days = c.execute("SELECT COUNT(DISTINCT snapshot_date) FROM options").fetchone()[0]
-          newest, symbols = c.execute(
-              "SELECT snapshot_date, COUNT(DISTINCT symbol) FROM options "
-              "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM options)"
-          ).fetchone()
+          from src.schwab_database import SchwabDatabase
+
+          db = SchwabDatabase(db_path="demo-data/schwab_database.db")
+          coverage = db.snapshot_symbol_counts(limit=100_000)
+          days = len(coverage)
+          newest, symbols = coverage[0] if coverage else (None, 0)
+
+          # Actually decode the newest chains, which is what the demo will
+          # do on its first request. A readable index in front of an
+          # unreadable partition is the failure that would look like success.
+          sampled = ("SPX", "AAPL", "QQQ")
+          contracts = sum(len(db.options_snapshot(sym, newest)) for sym in sampled) if newest else 0
+
+          c = sqlite3.connect("file:demo-data/schwab_database.db?mode=ro", uri=True)
           frames = c.execute("SELECT COUNT(*) FROM precomputed_metrics").fetchone()[0]
           h = sqlite3.connect("file:demo-data/vol_history.db?mode=ro", uri=True)
           history = h.execute("SELECT COUNT(*) FROM metric_history").fetchone()[0]
-          print(f"{days} days, newest {newest} with {symbols} symbols, {frames} precomputed frames, {history} history rows")
+          print(f"{days} days, newest {newest} with {symbols} symbols, "
+                f"{len(db.partition_paths())} partition(s), {contracts:,} contracts in 3 sampled chains, "
+                f"{frames} precomputed frames, {history} history rows")
+
           problems = []
           if history < 1000: problems.append(f"only {history} history rows -- IV rank would be meaningless")
           if days < 2: problems.append(f"only {days} day(s)")
           if symbols < 20: problems.append(f"newest day has only {symbols} symbols")
           if frames == 0: problems.append("no precomputed metrics -- the demo would be unusably slow")
+          if not db.partition_paths(): problems.append("no chain partitions -- the surface would be empty")
+          if contracts == 0: problems.append("the sampled chains decoded to nothing")
           if problems:
               sys.exit("Refusing to publish: " + "; ".join(problems))
           PY
@@ -114,7 +132,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NEWEST=$(python -c "import sqlite3;print(sqlite3.connect('file:demo-data/schwab_database.db?mode=ro',uri=True).execute('SELECT MAX(snapshot_date) FROM options').fetchone()[0])")
+          NEWEST=$(python -c "
+          from src.schwab_database import SchwabDatabase
+          print(SchwabDatabase(db_path='demo-data/schwab_database.db').snapshot_symbol_counts(limit=1)[0][0])
+          ")
+
+          # A manifest of the partition assets, so render.yaml can fetch them
+          # with plain curl against stable release URLs. The alternative --
+          # asking the GitHub API which assets exist -- would have Render's
+          # build box calling api.github.com unauthenticated, at 60 requests
+          # an hour per IP on addresses it shares with every other free
+          # instance. A deploy that fails on someone else's rate limit is not
+          # a trade worth making for one fewer file.
+          python - <<'PY'
+          from pathlib import Path
+          from src.chain_release import asset_name_for
+          from src.schwab_database import SchwabDatabase
+
+          db = SchwabDatabase(db_path="demo-data/schwab_database.db")
+          names = [asset_name_for(p) for p in db.partition_paths()]
+          Path("demo-data/chains-manifest.txt").write_text("\n".join(names) + "\n")
+          print("manifest:", names)
+          PY
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
@@ -127,7 +166,21 @@ jobs:
           # URL identical. Deleting and re-creating the release would also
           # work but briefly leaves the URL 404ing, and Render could deploy
           # into that window.
-          gh release upload "$TAG" demo-data/schwab_database.db demo-data/vol_history.db --clobber
+          # Partitions copied to their asset names first: `gh release upload`
+          # takes the asset name from the filename, and on disk a partition
+          # is 2026-11.db while the manifest and render.yaml expect
+          # chains-2026-11.db.
+          while read -r ASSET; do
+            [ -n "$ASSET" ] || continue
+            MONTH="${ASSET#chains-}"
+            cp "demo-data/schwab_database_chains/${MONTH}" "$RUNNER_TEMP/$ASSET"
+            gh release upload "$TAG" "$RUNNER_TEMP/$ASSET" --clobber
+          done < demo-data/chains-manifest.txt
+
+          gh release upload "$TAG" \
+            demo-data/schwab_database.db \
+            demo-data/chains-manifest.txt \
+            demo-data/vol_history.db --clobber
           gh release edit "$TAG" --notes "Simulated options market for the public demo — session $NEWEST, built $(date -u +%Y-%m-%dT%H:%MZ).
 
           **This contains no real market data.** Every quote is generated by src/synthetic_market.py: Black-Scholes over a parametric volatility surface, with a downward skew that flattens with maturity, a term structure, event bumps, and spreads that widen in the wings. It reproduces the shape of a real chain so the dashboard has something true to its purpose to work on; it is not anyone's market data and must not be used as such.

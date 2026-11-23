@@ -7,12 +7,17 @@ name: Daily vol snapshot
 # src/history_store.py's docstring for why a committed SQLite file rather
 # than a hosted database.
 #
-# The raw per-contract chains and daily closes
-# (database/schwab_database.db, see src/schwab_database.py) are NOT
-# committed. They are published as a release asset on the fixed tag
-# `chain-latest` and downloaded at the start of every run, because the table
+# The raw per-contract chains and daily closes (see src/schwab_database.py)
+# are NOT committed. They are published as release assets on the fixed tag
+# `chain-latest` -- one small index file plus one compressed partition per
+# calendar month -- and fetched at the start of every run, because the store
 # is append-only and each session is appended to the previous state. See
 # src/chain_release.py.
+#
+# This run fetches the two newest partitions, not the archive. It only ever
+# appends to the current month, and two covers the turn of a month where a
+# session's date and the calendar disagree. So a nightly run moves ~30MB
+# whatever year it is, instead of a figure that grows with the project.
 #
 # Why it is not in git, with the figures, so the next reader sees the trend
 # rather than one snapshot:
@@ -32,11 +37,19 @@ name: Daily vol snapshot
 # billed, so the wall at 10GB was `git push` being REJECTED here: data
 # collected, then unsavable.
 #
-# Release assets are not metered against that quota. The next ceiling is 2GB
-# PER ASSET, which at 12.2MB/session is roughly 114 sessions -- about 5.4
-# months from 2026-11-22. That is when a retention window stops being
-# optional. Check github.com/settings/billing/summary before acting on any
-# figure here.
+# Release assets are not metered against that quota. A single asset would
+# then have hit the next ceiling -- 2GB per asset, roughly 114 sessions at
+# 12.2MB, about 5.4 months -- which is relocating a wall rather than
+# removing one. So the store was compressed (13.5x, exactly; see
+# src/chain_codec.py) and split by month on the same day, which leaves
+# nothing here with a ceiling that arrives:
+#
+#   per asset   a month's partition is bounded by the length of a month,
+#               ~10MB at 0.9MB/session, against a 2GB limit
+#   asset count twelve a year, against no limit worth planning around
+#   per run     the two newest partitions, ~30MB, flat forever
+#
+# Check github.com/settings/billing/summary before acting on any figure here.
 #
 # history/vol_history.db IS still committed: 2.6MB of compact per-expiry
 # metrics, an ordinary git object, and what every IV Rank and z-score reads.
@@ -115,28 +128,36 @@ jobs:
           write_token_from_base64(os.environ['SCHWAB_TOKEN_B64'])
           "
 
-      # The chain table is append-only: today's session is appended to the
-      # database the previous run produced, so that state has to be on disk
-      # before collection starts. It arrives as a release asset rather than
-      # in the checkout -- see the header.
+      # The store is append-only: today's session is appended to the state
+      # the previous run produced, so that state has to be on disk before
+      # collection starts. It arrives as release assets rather than in the
+      # checkout -- see the header.
       #
       # Failing loudly when it is missing is the point. Carrying on from an
-      # empty database is the one outcome that destroys history: the job
-      # would collect one session, publish that as the entire chain, and
-      # replace four months Schwab will not serve again. src/chain_release.py
-      # refuses a payload that is not plainly the database and refuses to
-      # overwrite a local copy with a smaller one.
+      # empty store is the one outcome that destroys history: the job would
+      # collect one session, publish that as the entire archive, and replace
+      # four months Schwab will not serve again. src/chain_release.py refuses
+      # a payload that is not plainly a chain database, refuses to overwrite
+      # a local copy with a smaller one, and refuses to proceed at all when
+      # the release cannot be listed -- "could not find out what exists" and
+      # "nothing exists" must not resolve to the same action.
       #
-      # CHAIN_ROWS_BEFORE is the baseline the publish step compares against.
-      # If this step does not complete, that variable is unset and the
-      # publish refuses outright rather than guessing.
-      - name: Download the chain database
+      # --newest 2 rather than everything: see the header. The index file
+      # always comes across, and it is what carries the record of the months
+      # this run did NOT download -- which is why nothing here rebuilds the
+      # index. Rebuilding derives it from the partitions present, so a run
+      # holding two months would rebuild an index describing two months and
+      # publish that over one describing five.
+      #
+      # The baseline is what the publish step compares against. It is written
+      # to a file rather than $GITHUB_ENV because it is per-partition rather
+      # than a single number; if this step does not complete the file is
+      # absent and the publish refuses outright rather than guessing.
+      - name: Fetch the chain store
         run: |
           set -euo pipefail
-          python -m src.chain_release download database/schwab_database.db
-          ROWS=$(python -c 'from src.chain_release import row_count; print(row_count("database/schwab_database.db"))')
-          echo "CHAIN_ROWS_BEFORE=$ROWS" >> "$GITHUB_ENV"
-          echo "baseline: $ROWS contract rows"
+          python -m src.chain_release sync --newest 2
+          python -m src.chain_release baseline --out "$RUNNER_TEMP/chain-baseline.json"
 
       - name: Run daily snapshot
         env:
@@ -176,53 +197,79 @@ jobs:
       # step that saves the day's chains; nothing downstream of collection
       # gets to block it.
       #
-      # Three outcomes, kept distinct on purpose:
-      #   fewer rows than were downloaded -> REFUSE. The chain table only
-      #     ever grows, so fewer means the database was reset or truncated
-      #     somewhere in this run, and uploading it would overwrite every
-      #     session with the wreckage.
-      #   the same number -> nothing was collected. A run outside market
-      #     hours raises LiveDataUnavailableError and writes nothing (see
-      #     src/data_quality.py), so leave the asset alone. A no-op, not an
-      #     error.
-      #   more -> publish.
+      # `check --baseline` compares the store against the state this run
+      # started from and turns the answer into an exit code, so the decision
+      # lives in Python next to the data rather than in shell arithmetic:
       #
-      # No baseline means no decision can be made safely, so that refuses
-      # too: if the download step did not finish, the file on disk may be a
-      # fresh database holding only today's session.
+      #   0  something was collected -> publish
+      #   3  consistent, nothing collected -> leave the release alone. A run
+      #      outside market hours raises LiveDataUnavailableError and writes
+      #      nothing (see src/data_quality.py). Normal, not an error.
+      #   1  something shrank, or the store is inconsistent -> REFUSE. These
+      #      counts only ever grow, so smaller is damage, and uploading it
+      #      would overwrite every session with the wreckage.
       #
-      # --clobber replaces the asset in place, which keeps the download URL
-      # identical. Deleting and re-creating the release would briefly leave
-      # it 404ing and the next run curls that exact URL for its starting
-      # state -- the same reasoning recorded in publish-demo.yml.
-      - name: Publish the chain database
+      # A missing baseline file is the 1 case: without it a store holding
+      # only today's session cannot be told from one holding four months.
+      #
+      # Every local partition is uploaded, not only the month that changed.
+      # The run holds two, so that is ~30MB and needs no guess about which
+      # month a session landed in -- and --clobber on unchanged bytes is a
+      # no-op worth paying for over guessing wrong. --clobber also replaces
+      # in place, which keeps every download URL identical; deleting and
+      # re-creating the release would briefly leave them 404ing, and the next
+      # run fetches those exact URLs for its starting state. Same reasoning
+      # as publish-demo.yml.
+      - name: Publish the chain store
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: chain-latest
         run: |
-          set -euo pipefail
-          if [ -z "${CHAIN_ROWS_BEFORE:-}" ]; then
-            echo "No baseline: the download step did not complete, so the database on disk"
+          set -uo pipefail
+          BASELINE="$RUNNER_TEMP/chain-baseline.json"
+          if [ ! -f "$BASELINE" ]; then
+            echo "No baseline: the fetch step did not complete, so the store on disk"
             echo "cannot be compared against what this run started from. Refusing to publish."
             exit 1
           fi
-          python -m src.chain_release verify database/schwab_database.db --min-rows "$CHAIN_ROWS_BEFORE"
-          AFTER=$(python -c 'from src.chain_release import row_count; print(row_count("database/schwab_database.db"))')
-          if [ "$AFTER" -eq "$CHAIN_ROWS_BEFORE" ]; then
-            echo "Still $AFTER contract rows -- nothing collected this run. Leaving $TAG untouched."
-            exit 0
-          fi
-          echo "Publishing: $CHAIN_ROWS_BEFORE -> $AFTER contract rows"
-          gh release upload "$TAG" database/schwab_database.db --clobber
-          NEWEST=$(python -c "import sqlite3;print(sqlite3.connect('file:database/schwab_database.db?mode=ro',uri=True).execute('SELECT MAX(snapshot_date) FROM options').fetchone()[0])")
-          gh release edit "$TAG" --notes "Raw per-contract options chains and daily closes collected by .github/workflows/daily-snapshot.yml — through session $NEWEST, $AFTER contract rows, updated $(date -u +%Y-%m-%dT%H:%MZ).
+          python -m src.chain_release check --baseline "$BASELINE" --min-chains 1
+          STATUS=$?
+          case "$STATUS" in
+            0) ;;
+            3) echo "Nothing collected this run. Leaving $TAG untouched."; exit 0 ;;
+            *) exit "$STATUS" ;;
+          esac
+          set -e
 
-          Replaced in place after every collection, so this download URL is stable:
+          # Copied to its asset name before upload because `gh release
+          # upload` takes the asset's name from the filename -- the `#label`
+          # suffix sets a label, not a name. On disk a partition is
+          # 2026-11.db; on the release it has to be chains-2026-11.db, or
+          # two months of a future year would collide with other assets on
+          # the tag.
+          python -m src.chain_release publishable | while IFS=$'\t' read -r STORE_FILE ASSET; do
+            echo "uploading $STORE_FILE as $ASSET"
+            cp "$STORE_FILE" "$RUNNER_TEMP/$ASSET"
+            gh release upload "$TAG" "$RUNNER_TEMP/$ASSET" --clobber
+          done
+
+          SUMMARY=$(python -m src.chain_release check --min-chains 1)
+          NEWEST=$(python -c "
+          from src.schwab_database import SchwabDatabase
+          rows = SchwabDatabase().snapshot_symbol_counts(limit=1)
+          print(rows[0][0] if rows else 'none')
+          ")
+          gh release edit "$TAG" --notes "Raw per-contract options chains and daily closes collected by .github/workflows/daily-snapshot.yml — through session $NEWEST. $SUMMARY. Updated $(date -u +%Y-%m-%dT%H:%MZ).
+
+          One index file plus one compressed partition per calendar month. Replaced in place after every collection, so these download URLs are stable:
 
               https://github.com/${{ github.repository }}/releases/download/$TAG/schwab_database.db
+              https://github.com/${{ github.repository }}/releases/download/$TAG/chains-YYYY-MM.db
 
-          Not committed to the repository: Git LFS stores a complete new copy per push, which took the quota to 9.01GB of an included 10GB while the daily growth rate never changed. Release assets are not metered against that quota."
+          Fetch the lot with \`python -m src.chain_release sync\`, which skips months whose published size already matches the local copy.
+
+          Not committed to the repository: Git LFS stores a complete new copy per push, which took the quota to 9.01GB of an included 10GB while the daily growth rate never changed. Release assets are not metered against that quota, and splitting by month means no single asset approaches the 2GB per-asset limit however many years accumulate."
           echo "published session $NEWEST"
 
       # Placed after the commit AND the publish deliberately: a validation

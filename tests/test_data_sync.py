@@ -117,9 +117,8 @@ class TestRefusesToClobberLocalData:
         This is not a loosened safeguard. Listing it here was what made the
         Sync button refuse to run from a checkout whose chain database
         differed from origin/main at all -- which, on a feature branch, is
-        always. chain_release.download() now carries the protection that
-        matters, by refusing an asset holding fewer rows than the local
-        copy."""
+        always. chain_release carries the protection that matters now, by
+        refusing any asset holding fewer rows than the local copy."""
         assert "database/schwab_database.db" not in data_sync._TRACKED_DATA
         assert data_sync._TRACKED_DATA == ("history/vol_history.db",)
 
@@ -397,7 +396,12 @@ class TestRefreshChain:
 
     @pytest.fixture
     def chain(self, monkeypatch, tmp_path):
-        """A fake asset and a local file, with the sizes under test control."""
+        """The real _refresh_chain, with chain_release.sync() under control.
+
+        The autouse stub in this module replaces _refresh_chain for every
+        other test, which would otherwise shadow the very function this
+        class exists to test -- hence restoring the copy captured at import.
+        """
         from src import chain_release
 
         local = tmp_path / "schwab_database.db"
@@ -406,55 +410,67 @@ class TestRefreshChain:
         monkeypatch.setattr(data_sync, "_CHAIN_DB", "schwab_database.db")
         return local, chain_release
 
-    def test_an_unchanged_size_skips_the_download(self, chain, monkeypatch):
-        """The chain table only ever grows, so equal sizes mean there is
-        nothing new -- and this is a ~658MB transfer not to start twice."""
+    def test_nothing_new_upstream_reports_no_change(self, chain, monkeypatch):
+        """Months that are finished never change again, so a second sync
+        transfers nothing -- which is what makes the button cheap to press."""
         local, chain_release = chain
-        local.write_bytes(b"x" * 1234)
-        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 1234)
-        monkeypatch.setattr(chain_release, "download", _must_not_run)
+        monkeypatch.setattr(
+            chain_release, "sync",
+            lambda *a, **k: {"index": 7, "downloaded": [], "skipped": ["2026-11"], "months": ["2026-11"]},
+        )
 
         assert data_sync._refresh_chain() == data_sync._ChainOutcome(changed=False)
 
-    def test_a_different_size_downloads(self, chain, monkeypatch):
+    def test_a_downloaded_month_reports_a_change(self, chain, monkeypatch):
         local, chain_release = chain
-        local.write_bytes(b"x" * 1234)
-        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 9999)
-        monkeypatch.setattr(chain_release, "download", lambda *a, **k: 9999)
+        monkeypatch.setattr(
+            chain_release, "sync",
+            lambda *a, **k: {"index": 7, "downloaded": [("2026-11", 24)], "skipped": [], "months": ["2026-11"]},
+        )
 
         assert data_sync._refresh_chain().changed is True
 
-    def test_a_missing_local_file_downloads(self, chain, monkeypatch):
-        """A fresh checkout has no database at all -- that is the one case
-        where the download is certainly needed."""
-        _, chain_release = chain
-        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 1234)
-        monkeypatch.setattr(chain_release, "download", lambda *a, **k: 1234)
-
-        assert data_sync._refresh_chain().changed is True
-
-    def test_an_unknowable_remote_size_downloads(self, chain, monkeypatch):
-        """Every uncertainty resolves toward downloading. Being wrong about
-        "nothing changed" is silent and persists; being wrong the other way
-        costs one transfer."""
+    def test_a_success_adds_no_note(self, chain, monkeypatch):
+        """`note` is rendered as "Synced the metric history, but {note}", so
+        putting good news in it would produce a sentence that reads as a
+        partial failure."""
         local, chain_release = chain
-        local.write_bytes(b"x" * 1234)
-        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: None)
-        monkeypatch.setattr(chain_release, "download", lambda *a, **k: 1234)
+        monkeypatch.setattr(
+            chain_release, "sync",
+            lambda *a, **k: {"index": 7, "downloaded": [("2026-11", 24)], "skipped": [], "months": ["2026-11"]},
+        )
 
-        assert data_sync._refresh_chain().changed is True
+        assert data_sync._refresh_chain().note is None
 
-    def test_a_failed_download_is_reported_not_raised(self, chain, monkeypatch):
+    def test_it_asks_for_every_month_not_just_the_recent_ones(self, chain, monkeypatch):
+        """The dashboard can be asked for any date in the archive. A
+        developer who synced only the current month would get an empty
+        surface for last August with no indication why -- `newest` is for
+        the nightly job, which only appends to the current month."""
+        local, chain_release = chain
+        seen = {}
+
+        def record(db_path=None, **kwargs):
+            seen.update(kwargs)
+            seen["db_path"] = db_path
+            return {"index": 1, "downloaded": [], "skipped": [], "months": []}
+
+        monkeypatch.setattr(chain_release, "sync", record)
+        data_sync._refresh_chain()
+
+        assert seen.get("newest") is None
+        assert seen.get("months") is None
+        assert Path(seen["db_path"]).name == "schwab_database.db"
+
+    def test_a_failed_sync_is_reported_not_raised(self, chain, monkeypatch):
         """The history pull may well have succeeded. "Most of your data
         arrived" is a different message from "sync failed"."""
         local, chain_release = chain
-        local.write_bytes(b"x" * 1234)
-        monkeypatch.setattr(chain_release, "remote_size", lambda *a, **k: 9999)
 
         def boom(*a, **k):
             raise chain_release.ChainDownloadError("404, no asset on that tag")
 
-        monkeypatch.setattr(chain_release, "download", boom)
+        monkeypatch.setattr(chain_release, "sync", boom)
 
         outcome = data_sync._refresh_chain()
 
@@ -469,11 +485,7 @@ class TestRefreshChain:
         monkeypatch.setattr(
             data_sync,
             "_refresh_chain",
-            lambda: data_sync._ChainOutcome(changed=False, note="the chain database did not update (404)"),
+            lambda: data_sync._ChainOutcome(changed=False, note="the chain store did not update (404)"),
         )
 
         assert "404" in data_sync.pull_latest().message
-
-
-def _must_not_run(*args, **kwargs):
-    raise AssertionError("download() must not be called when the sizes already match")

@@ -23,9 +23,11 @@ What a user means by "refresh" now is "show me what the pipeline collected",
 and that arrives in two places, so this fetches both:
 
   * history/vol_history.db is committed, so a `git pull --ff-only`.
-  * database/schwab_database.db is not. It left Git LFS on 2026-11-22 --
-    LFS stores a complete new copy per push, which took the quota to 9.01GB
-    of an included 10GB -- and is now a release asset. See
+  * The chain store is not. It left Git LFS on 2026-11-22 -- LFS stores a
+    complete new copy per push, which took the quota to 9.01GB of an
+    included 10GB -- and is now a set of release assets: one small index
+    file plus one compressed partition per calendar month, so a sync
+    transfers the month that changed rather than the whole archive. See
     src/chain_release.py.
 
 `git pull --ff-only` and nothing else: no user input reaches the command
@@ -75,29 +77,35 @@ class _ChainOutcome:
 
 
 def _refresh_chain() -> _ChainOutcome:
-    """Bring the local chain database up to the published asset.
+    """Bring the local chain store up to the published assets.
 
-    Skipped when the local file already matches the asset's length. The
-    chain table only ever grows, so equal sizes mean there is nothing new,
-    and this is a ~658MB transfer not to start without a reason. Every
-    uncertainty resolves toward downloading -- a missing local file, an
-    unreadable one, a server that will not give a length -- because being
-    wrong about "nothing changed" is silent and persists, while being wrong
-    about "something changed" costs one transfer.
+    Every published month, not just the recent ones: the dashboard can be
+    asked for any date in the archive, and a developer who synced only the
+    current month would get an empty surface for last August with no
+    indication why. The nightly job is the one that wants `newest=2` -- it
+    only appends to the current month.
+
+    Partitions whose published size matches the local file are skipped. A
+    month's chains only ever get added to, so equal sizes mean there is
+    nothing new in that month, and most months are finished and will never
+    change again. That is what makes a sync ~11MB instead of a whole
+    archive. Every uncertainty resolves toward downloading -- a missing
+    file, an unreadable one, a release that will not list itself -- because
+    being wrong about "nothing changed" is silent and persists, while being
+    wrong about "something changed" costs one transfer.
 
     A failure here is reported, not raised. The history pull may well have
     succeeded, and "most of your data arrived" is a different message from
     "sync failed".
     """
-    destination = _PROJECT_ROOT / _CHAIN_DB
-    local = destination.stat().st_size if destination.exists() else None
-    if local is not None and local == chain_release.remote_size():
-        return _ChainOutcome(changed=False)
     try:
-        chain_release.download(destination)
+        result = chain_release.sync(_PROJECT_ROOT / _CHAIN_DB)
     except chain_release.ChainDownloadError as exc:
-        return _ChainOutcome(changed=False, note=f"the chain database did not update ({exc})")
-    return _ChainOutcome(changed=True)
+        return _ChainOutcome(changed=False, note=f"the chain store did not update ({exc})")
+    # `note` is reserved for things that did not go as hoped -- pull_latest
+    # renders it as "Synced the metric history, but {note}" -- so a
+    # successful sync says nothing extra.
+    return _ChainOutcome(changed=bool(result["downloaded"]))
 
 
 @dataclass

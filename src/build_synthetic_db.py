@@ -23,9 +23,11 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 from src import synthetic_market as sm
 from src.history_store import HistoryStore
-from src.schwab_database import SchwabDatabase
+from src.schwab_database import _OPTIONS_CHAIN_COLUMNS, SchwabDatabase
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -34,6 +36,42 @@ _OPTION_COLUMNS = (
     "bid ask mark last volume open_interest implied_volatility delta gamma theta "
     "vega rho in_the_money theoretical_value underlying_price fetch_time"
 ).split()
+
+# synthetic_market.generate_chain() emits storage-shaped rows (snake_case,
+# the column names the old `options` table used). append_options_snapshot()
+# takes a chain the way Schwab hands one over (camelCase, no underlying
+# symbol or snapshot date -- those are arguments). _CHAIN_ALIASES is the one
+# mapping between the two, derived from the store's own so the two cannot
+# drift: if a column is renamed there, this follows.
+_CHAIN_ALIASES = {dest: src for src, dest in _OPTIONS_CHAIN_COLUMNS.items()}
+
+
+def _as_chain_frame(rows: list[dict]) -> pd.DataFrame:
+    """Storage-shaped synthetic rows -> a chain shaped like Schwab's."""
+    frame = pd.DataFrame(rows)
+    return frame[[c for c in _CHAIN_ALIASES if c in frame.columns]].rename(
+        columns=_CHAIN_ALIASES
+    )
+
+
+def _as_price_frame(symbol: str, path: list[tuple]) -> pd.DataFrame:
+    """synthetic_market.price_path() rows -> what append_price_history takes.
+
+    Volume is derived from a hash of (symbol, date) rather than randomised,
+    so a rebuild of the same market produces the same file. The demo is
+    republished weekly and a diff that is all noise tells you nothing about
+    whether the generator changed.
+    """
+    return pd.DataFrame({
+        "datetime": pd.to_datetime([d for d, *_ in path]),
+        "open": [o for _, o, _, _, _ in path],
+        "high": [h for _, _, h, _, _ in path],
+        "low": [low for _, _, _, low, _ in path],
+        "close": [c for *_, c in path],
+        "volume": [
+            int(2_000_000 + abs(hash((symbol, d))) % 8_000_000) for d, *_ in path
+        ],
+    })
 
 
 def _sessions(end: date, count: int) -> list[date]:
@@ -53,10 +91,11 @@ def build(days: int, out_dir: Path, end: date | None = None) -> Path:
     if db_path.exists():
         db_path.unlink()
 
-    # Creating through SchwabDatabase rather than hand-rolling the DDL keeps
-    # the schema definitionally identical to production. A demo database
-    # that had drifted a column would fail in the one place nobody tests.
-    SchwabDatabase(db_path)
+    # Writing through SchwabDatabase rather than hand-rolling SQL keeps the
+    # synthetic chains definitionally identical in shape to real ones -- same
+    # normalisation, same encoding, same stored dtypes. A demo database that
+    # had drifted a column would fail in the one place nobody tests.
+    db = SchwabDatabase(db_path)
 
     # The metric history is a second database and is not optional. IV rank,
     # IV percentile and the richness columns all read it, and the committed
@@ -69,20 +108,12 @@ def build(days: int, out_dir: Path, end: date | None = None) -> Path:
     history = HistoryStore(history_path)
 
     sessions = _sessions(end or date.today(), days)
-    conn = sqlite3.connect(db_path)
 
     total = 0
     history_rows = 0
     for spec in sm.UNIVERSE:
         path = sm.price_path(spec, days=400, end=sessions[-1])
-        conn.executemany(
-            "INSERT OR REPLACE INTO stock_prices (symbol, price_date, open, high, low, close, volume)"
-            " VALUES (?,?,?,?,?,?,?)",
-            [
-                (spec.symbol, d.isoformat(), o, h, low, c, int(2_000_000 + abs(hash((spec.symbol, d))) % 8_000_000))
-                for d, o, h, low, c in path
-            ],
-        )
+        db.append_price_history(spec.symbol, _as_price_frame(spec.symbol, path))
 
         # A year of history behind the chains: IV rank is a percentile
         # against the symbol's own past, so a handful of sessions would
@@ -99,15 +130,7 @@ def build(days: int, out_dir: Path, end: date | None = None) -> Path:
             if spot is None:
                 continue
             rows = sm.generate_chain(spec, session, spot)
-            conn.executemany(
-                f"INSERT OR REPLACE INTO options ({','.join(_OPTION_COLUMNS)})"
-                f" VALUES ({','.join('?' * len(_OPTION_COLUMNS))})",
-                [tuple(r[c] for c in _OPTION_COLUMNS) for r in rows],
-            )
-            total += len(rows)
-
-    conn.commit()
-    conn.close()
+            total += db.append_options_snapshot(spec.symbol, session, _as_chain_frame(rows))
 
     _precompute(db_path, sessions[-1].isoformat())
     print(f"{total:,} contracts across {len(sm.UNIVERSE)} symbols and {len(sessions)} sessions")

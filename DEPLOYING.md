@@ -55,15 +55,30 @@ and the trailing z-scores need the long series to mean anything.
 
 ## 2. Publish it
 
-Neither database is committed. The live chain database is ~658MB and is
-itself a release asset (tag `chain-latest`, see `src/chain_release.py`) --
-and the demo should not serve it in any case, since it runs on a simulated
-market rather than real Schwab chains.
+Neither database is committed. The live chain store is itself a set of
+release assets (tag `chain-latest`, see `src/chain_release.py`) -- and the
+demo should not serve it in any case, since it runs on a simulated market
+rather than real Schwab chains.
 
-Upload `demo-data/schwab_database.db` as a **GitHub Release asset** and copy
-its download URL. Release assets are free, are not metered against the Git
-LFS quota, and are simple to replace when you want the demo to show fresher
-data.
+The chain store is **two things on disk**, and both have to be published:
+
+```
+demo-data/schwab_database.db              index, prices, precomputed metrics
+demo-data/schwab_database_chains/
+    2026-11.db                            the compressed chains
+demo-data/chains-manifest.txt             which partitions exist
+```
+
+`publish-demo.yml` does this for you. By hand: upload the index file, each
+partition renamed to `chains-YYYY-MM.db`, and a `chains-manifest.txt`
+listing those partition asset names one per line. `render.yaml` reads the
+manifest and derives every URL from `DEMO_DB_URL`'s own directory, so there
+is still exactly one value to configure -- but publishing the index file
+alone gives you a demo that knows which dates exist and has no chains for
+any of them.
+
+Release assets are free, are not metered against the Git LFS quota, and are
+simple to replace when you want the demo to show fresher data.
 
 ## 3. Backend on Render
 

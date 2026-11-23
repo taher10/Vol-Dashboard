@@ -1,0 +1,158 @@
+name: Migrate the chain store to monthly partitions
+
+# ONE-OFF. Run it once from the Actions tab, confirm the output, then delete
+# this file. It converts the published single-table chain database into the
+# compressed monthly partitions src/schwab_database.py now reads, and
+# publishes them alongside it.
+#
+# Why this runs here and not on a laptop
+# --------------------------------------
+# The input is a 658MB release asset and the output is ~52MB of new assets.
+# Doing it on the runner means GitHub's own network carries both legs, and
+# `gh` is authenticated here by github.token with no credential to create.
+#
+# Why it is manual
+# ----------------
+# The source is the only copy of four months of option chains -- Schwab
+# serves current chains only, so a day lost here is lost permanently. A
+# migration that ran on a schedule, or on push, would run at a time nobody
+# chose and with nobody reading the output. This one is dispatched by a
+# person who then looks at the numbers.
+#
+# What it does NOT do
+# -------------------
+# It does not delete, truncate or replace the existing `schwab_database.db`
+# asset's chains. The migrated index file published at the end still carries
+# the original `options` table, because the whole file is republished with
+# chain_index added to it rather than rebuilt from scratch. So the state
+# before this ran stays downloadable from the same URL, and the rollback is
+# to ignore the partitions.
+#
+# Ordering
+# --------
+# daily-snapshot.yml refuses to run against an unmigrated release -- see
+# _is_pre_migration in src/chain_release.py -- so if the nightly fires before
+# this does, it fails loudly rather than publishing an index that describes
+# one day over one that describes four months. Running this fixes that; no
+# data is at risk in the meantime.
+
+on:
+  workflow_dispatch: {}
+
+# A second run racing the first would have both uploading to the same tag,
+# and the loser leaves the release holding a partition from one migration and
+# an index from another. publish-demo.yml carries a concurrency group for the
+# same reason.
+concurrency:
+  group: chain-store-migration
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Fetched with curl rather than through src.chain_release, because that
+      # module now refuses a pre-migration asset by design -- which is the
+      # point of this job's existence. --fail turns a 404 into a non-zero
+      # exit instead of an HTML file named schwab_database.db.
+      - name: Download the published database
+        env:
+          TAG: chain-latest
+        run: |
+          set -euo pipefail
+          mkdir -p legacy
+          curl --fail --location --silent --show-error \
+            --output legacy/schwab_database.db \
+            "https://github.com/${{ github.repository }}/releases/download/$TAG/schwab_database.db"
+          ls -l legacy/schwab_database.db
+          python - <<'PY'
+          import sqlite3
+          c = sqlite3.connect("file:legacy/schwab_database.db?mode=ro", uri=True)
+          rows = c.execute("SELECT COUNT(*) FROM options").fetchone()[0]
+          slices = c.execute("SELECT COUNT(*) FROM (SELECT DISTINCT symbol, snapshot_date FROM options)").fetchone()[0]
+          span = c.execute("SELECT MIN(snapshot_date), MAX(snapshot_date) FROM options").fetchone()
+          prices = c.execute("SELECT COUNT(*) FROM stock_prices").fetchone()[0]
+          print(f"{rows:,} contract rows, {slices:,} chains, {span[0]} -> {span[1]}, {prices:,} price rows")
+          if rows < 1_000_000:
+              raise SystemExit(f"Only {rows:,} rows -- that is not the archive. Stopping.")
+          PY
+
+      # The migration writes the partitions beside a NEW index file and never
+      # opens the source for writing, then re-reads every chain and compares
+      # it against the query it replaces -- row for row, dtype for dtype,
+      # with pandas.testing.assert_frame_equal(check_exact=True). A single
+      # mismatch exits non-zero and nothing is published.
+      #
+      # Exactness rather than closeness because this is the only copy: a
+      # JSON round-trip returns 0.30000000000000004 for a stored 0.3, and
+      # "near enough" is not a property you can restore later.
+      - name: Migrate and verify every chain
+        run: |
+          set -euo pipefail
+          python -m src.migrate_to_partitions \
+            --source legacy/schwab_database.db \
+            --destination database/schwab_database.db
+
+      # Published only after the verification above exited 0. The index file
+      # goes last: until it is there, a reader fetching partitions finds no
+      # index describing them, which src/schwab_database.py heals by
+      # rebuilding. The reverse order would leave a window where the index
+      # promises months whose partitions have not arrived.
+      - name: Publish the partitions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: chain-latest
+        run: |
+          set -euo pipefail
+          python -m src.chain_release check --min-chains 1000
+
+          python -m src.chain_release publishable | tail -n +2 \
+            | while IFS=$'\t' read -r STORE_FILE ASSET; do
+            echo "uploading $STORE_FILE as $ASSET"
+            cp "$STORE_FILE" "$RUNNER_TEMP/$ASSET"
+            gh release upload "$TAG" "$RUNNER_TEMP/$ASSET" --clobber
+          done
+
+          gh release upload "$TAG" database/schwab_database.db --clobber
+          echo
+          echo "Published. Assets now on $TAG:"
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "  \(.name)  \(.size) bytes"'
+
+      # Proves the published set is usable from outside, by fetching it the
+      # way every reader will and reading a chain back out. A migration that
+      # verified locally and published something unreadable would be the
+      # worst outcome of all, because it would look like a success.
+      - name: Fetch what was just published and read it
+        run: |
+          set -euo pipefail
+          rm -rf roundtrip && mkdir -p roundtrip
+          SCHWAB_DB_PATH=roundtrip/schwab_database.db python -m src.chain_release sync
+          SCHWAB_DB_PATH=roundtrip/schwab_database.db python - <<'PY'
+          from src.schwab_database import SchwabDatabase
+          db = SchwabDatabase()
+          counts = db.snapshot_symbol_counts(limit=3)
+          print("most recent sessions:", counts)
+          newest_day, _ = counts[0]
+          for symbol in ("SPX", "AAPL"):
+              chain = db.options_snapshot(symbol, newest_day)
+              print(f"  {symbol} {newest_day}: {len(chain):,} contracts")
+          dates = db.options_snapshot_dates("SPX")
+          print(f"SPX has {len(dates)} sessions, {dates[0]} -> {dates[-1]}")
+          if len(dates) < 30:
+              raise SystemExit("Fewer SPX sessions than expected -- do not delete anything.")
+          PY
+          echo
+          echo "Round-trip clean. Delete .github/workflows/migrate-chain-store.yml now."

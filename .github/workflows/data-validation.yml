@@ -36,24 +36,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # This job reads history/vol_history.db, an ordinary git object that
-      # arrives with the checkout. It never opens
-      # database/schwab_database.db -- a 658MB release asset since
-      # 2026-11-22 -- so it does not download it. The validator's raw-chain
-      # cross-check therefore reports itself SKIPPED here and runs in
-      # daily-snapshot.yml instead, which downloads that file anyway because
-      # it has to append to it.
+      # arrives with the checkout. It never opens the chain store -- release
+      # assets since 2026-11-22 -- so it does not fetch it. The validator's
+      # raw-chain cross-check therefore reports itself SKIPPED here and runs
+      # in daily-snapshot.yml instead, which fetches the store anyway
+      # because it has to append to it.
       #
       # Nothing here is LFS-tracked any more, so there is no `lfs: true` to
-      # omit. The reasoning survives the change unaltered, which is the
-      # point: do not fetch 658MB you will not open. Two earlier versions of
-      # this comment justified it by a 1GB/month LFS bandwidth tier, which
-      # never existed.
+      # omit. The reasoning survives every change to how the chains are
+      # stored, which is the point: do not fetch what you will not open. Two
+      # earlier versions of this comment justified it by a 1GB/month LFS
+      # bandwidth tier, which never existed.
       #
       # Adding that cross-check without this comment being updated is what
       # broke run #2 on 2026-09-15: the validator opened the unfetched LFS
       # pointer as SQLite and died with "file is not a database". The
-      # equivalent mistake now is assuming the chain database is present
-      # because the checkout succeeded.
+      # equivalent mistake now is assuming the chain store is present
+      # because the checkout succeeded -- src/validate_collection.py's
+      # open_chain_db() checks the paths before constructing anything,
+      # because constructing a SchwabDatabase CREATES the store it is
+      # pointed at and would turn "nobody fetched it" into "nothing was
+      # ever collected".
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5

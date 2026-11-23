@@ -3,7 +3,7 @@ Tests for src/backfill_session_dates.py.
 
 20 of 35 stored snapshot dates sit a day ahead of the session they hold,
 because collections that ran past midnight UTC were dated by the UTC clock.
-Relabelling them touches a ~400MB database and the metric history, so the
+Relabelling them rewrites chain partitions and the metric history, so the
 properties worth pinning are the ones that make it safe to run rather than
 the arithmetic.
 
@@ -16,32 +16,60 @@ dropped when the true figure is zero -- a preview that disagrees with the
 apply is worse than none, because it teaches you to ignore it.
 """
 
-import sqlite3
+from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from src import backfill_session_dates as backfill
+from src.schwab_database import SchwabDatabase, resolve_partition_root
 
 
 def _db(path: Path, rows: list[tuple]) -> Path:
-    """rows: (snapshot_date, symbol, contract_symbol, fetch_time)"""
-    conn = sqlite3.connect(path)
-    conn.execute(
-        "CREATE TABLE options (symbol TEXT, snapshot_date TEXT, contract_symbol TEXT, "
-        "fetch_time TEXT, PRIMARY KEY (symbol, snapshot_date, contract_symbol))"
-    )
-    conn.executemany(
-        "INSERT INTO options (snapshot_date, symbol, contract_symbol, fetch_time) VALUES (?,?,?,?)", rows
-    )
-    conn.commit()
-    conn.close()
+    """rows: (snapshot_date, symbol, contract_symbol, fetch_time)
+
+    Written through the real store rather than hand-rolled SQL, so the
+    fixtures exercise the same encoding, partitioning and index the script
+    will meet in production. The chains carry only a contract symbol and a
+    fetch time because those are the only columns this script reads -- the
+    store fills the rest in with nulls, which is itself worth having under
+    test.
+    """
+    grouped: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+    for snapshot_date, symbol, contract_symbol, fetch_time in rows:
+        grouped[(symbol, snapshot_date)].append((contract_symbol, fetch_time))
+
+    db = SchwabDatabase(db_path=path)
+    for (symbol, snapshot_date), contracts in grouped.items():
+        db.append_options_snapshot(
+            symbol,
+            date.fromisoformat(snapshot_date),
+            pd.DataFrame({
+                "symbol": [c for c, _ in contracts],
+                "fetchTime": [f for _, f in contracts],
+            }),
+        )
     return path
 
 
 def _dates(path: Path) -> list[str]:
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as c:
-        return [r[0] for r in c.execute("SELECT DISTINCT snapshot_date FROM options ORDER BY 1")]
+    db = SchwabDatabase(db_path=path)
+    with db._connect() as c:
+        return [r[0] for r in c.execute(
+            "SELECT DISTINCT snapshot_date FROM chain_index ORDER BY 1"
+        )]
+
+
+def _store_bytes(path: Path) -> dict[str, bytes]:
+    """Every file the store is made of, so "untouched" can mean all of it."""
+    files = {path.name: path.read_bytes()}
+    root = resolve_partition_root(path)
+    if root.is_dir():
+        for partition in sorted(root.glob("*.db")):
+            files[partition.name] = partition.read_bytes()
+    return files
 
 
 class TestMapping:
@@ -93,8 +121,9 @@ class TestCascadingRelabel:
 
     def test_a_genuine_duplicate_is_dropped_not_crashed(self, tmp_path):
         """A partial run fetched after midnight ET belongs to a session that
-        already holds that contract. The primary key forbids both, so the
-        later (staler) fetch loses."""
+        already holds that symbol. Both cannot occupy one key, so the later
+        (staler) fetch loses -- now a whole chain rather than a row, because
+        a chain is what the store holds."""
         db = _db(tmp_path / "c.db", [
             ("2026-07-28", "SPX", "c1", "2026-07-28T21:51:00+00:00"),  # stays
             ("2026-07-29", "SPX", "c1", "2026-07-29T05:40:00+00:00"),  # -> 07-28, clashes
@@ -104,20 +133,24 @@ class TestCascadingRelabel:
 
         assert stats["dropped"] == 1
         assert _dates(db) == ["2026-07-28"]
-        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as c:
-            kept = c.execute("SELECT fetch_time FROM options").fetchone()[0]
-        assert kept.startswith("2026-07-28"), "the earlier, closer-to-close fetch should survive"
+        kept = SchwabDatabase(db_path=db).options_snapshot("SPX", date(2026, 7, 28))
+        assert kept["fetch_time"].iloc[0].startswith("2026-07-28"), \
+            "the earlier, closer-to-close fetch should survive"
 
 
 class TestDryRunIsSafe:
     def test_leaves_the_originals_untouched(self, tmp_path):
+        """Every file of the store, not just the one named on the command
+        line. The chains live in partitions beside it, and a dry run that
+        relabelled those while leaving the index alone would be the most
+        confusing possible outcome."""
         chain = _db(tmp_path / "c.db", [("2026-10-15", "SPX", "c1", "2026-10-15T00:30:00+00:00")])
         history = tmp_path / "h.db"
-        before = chain.read_bytes()
+        before = _store_bytes(chain)
 
         backfill.dry_run(chain, history, tmp_path / "work")
 
-        assert chain.read_bytes() == before, "dry run must not modify the real database"
+        assert _store_bytes(chain) == before, "dry run must not modify the real store"
         assert _dates(chain) == ["2026-10-15"]
 
     def test_reports_what_it_would_do(self, tmp_path):
