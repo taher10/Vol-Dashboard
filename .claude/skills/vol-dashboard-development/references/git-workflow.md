@@ -38,6 +38,26 @@ Then stage the real code changes explicitly (never these two files) and commit.
 
 Run `git status` first. If there's anything uncommitted that isn't disposable test data, stash it (`-u` to include untracked files) rather than using `git checkout --`/`git reset --hard`/similar directly — stashing is reversible, discarding isn't. This project has hit exactly this situation (mid-session branch switches with real uncommitted feature work sitting in the tree) more than once.
 
+## Check the target ref before switching, not just the tree
+
+`git status` reporting clean does **not** mean a branch switch is safe. The data
+files under `database/` are untracked and gitignored, so they never show up as
+dirty — and checking out a commit where one of those paths *was* tracked makes
+git write the old version straight over the local file, with no conflict and no
+warning. A fast-forward past the commit that removed it then deletes it.
+
+Before switching, for any path holding real local data:
+
+```bash
+git ls-tree <target-ref> database/schwab_database.db   # empty = safe
+```
+
+Prefer `git checkout -b new-branch origin/main` over `git checkout main` followed
+by a merge: it goes straight to the target commit instead of transiting a stale
+local `main` that may predate the removal. This has destroyed live data once
+(2026-11-24) — see "A clean `git status` does not mean a branch switch is safe"
+in `known-issues.md` for the full incident and the LFS-cache recovery.
+
 ## Commit messages and PR descriptions
 
 End every commit with:
