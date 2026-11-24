@@ -6,6 +6,55 @@ Newest entries at the top. Each entry: what it looks like, why it happens, the a
 
 ---
 
+## A clean `git status` does not mean a branch switch is safe
+
+**Recurred: 1 time (2026-11-24), and it destroyed live data in a tree that `git status` called clean.**
+
+**What it looks like:** you replace a large tracked file with an untracked local
+replacement at the same path (or near it), `git status` reports clean because the
+new path is gitignored, you switch branches to start unrelated work — and the
+replacement is gone.
+
+**Why it happens.** Two steps, neither of which warns:
+
+1. Checking out a commit where that path **was** tracked makes git materialize it.
+   For an LFS path the smudge filter writes the real blob straight over whatever
+   is sitting there. Git does not consider this a conflict: it is writing a file
+   it believes it owns, and the thing it overwrote was never in the index.
+2. Fast-forwarding from there to a commit where the path was *removed* then
+   deletes it.
+
+So `git checkout main && git merge --ff-only origin/main` — where local `main`
+still points at a pre-removal commit — silently overwrites and then deletes.
+`git status` was clean the whole time, so nothing was stashable and the
+"stash before you discard" rule in `git-workflow.md` does not help here.
+
+**The actual fix** is to check what the *local* ref points at, not just the tree:
+
+```bash
+git ls-tree <target-ref> path/to/file   # empty output = safe to switch
+```
+
+Do this for any path holding real local data before switching. `git checkout -b
+new-branch origin/main` is safer than `git checkout main` + merge, because it
+goes straight to the target commit instead of transiting a stale local `main`.
+
+**What saved it, and will not always:** the file was byte-identical to a cached
+LFS object under `.git/lfs/objects/`, so it could be restored with a plain `cp`
+and the derived store rebuilt from it. `git lfs prune` would have removed that
+cache. Verify a cache object before trusting it — **an LFS object's filename is
+the sha256 of its contents**, so `shasum -a 256` against the filename proves
+both identity and integrity in one step.
+
+**Also note what was *not* recoverable from the derived data.** The partitions
+survived (untracked, never tracked, so nothing touched them), but the 1MB index
+file held `stock_prices` and `precomputed_metrics`, which live nowhere else.
+`rebuild_index()` reconstructs chain rows from partitions and would have
+silently produced a store missing both. Re-deriving from the legacy source was
+the only complete fix.
+
+---
+
 ## FIRST: check *which step* failed before assuming it's the token
 
 The daily-snapshot workflow has now failed for two genuinely different reasons that look identical from the outside ("the pipeline is dead, data is stale"). Which step failed tells you which problem you have, and the fixes are different — so always check this first rather than reaching for the token re-auth below. No auth needed:
@@ -93,6 +142,7 @@ If this recurs a 4th time, the real fix is probably to stop relying on manual co
 | 2026-11-19 | LFS, 9.01GB of 10GB | one run from a hard stop |
 | 2026-11-22 | release asset, tag `chain-latest` | LFS usage frozen — but the next ceiling was **2GB per asset**, ~114 sessions, ~5.4 months. A known future wall is not a fix |
 | 2026-11-22 | compressed monthly partitions | 658MB → 52MB (12.6x). Nothing left with a ceiling that arrives |
+| 2026-11-24 | partitions published, live | migrated in CI **from Git LFS**, because the seed asset the plan depended on was never published — see the ordering trap below |
 
 **Why it kept being misread:** LFS cannot delta-compress a SQLite file, so **every push stores a complete new copy**. 58 commits × a file growing to 658MB = 9GB, with the daily growth rate (12.2MB/session) never once changing. Storage is a **stock, not a flow** — it does not reset monthly, and deleting branches or rewriting history does not reclaim it. Anyone reasoning from "how fast does the file grow" gets a number that is five times too small.
 
@@ -120,7 +170,40 @@ Both untracked and gitignored. Published on the `chain-latest` release as `schwa
 
 **Nothing here has a ceiling that arrives:** a month's partition is bounded by the length of a month; the asset count grows by twelve a year against no meaningful limit; a nightly run moves ~30MB whatever year it is.
 
+**The ordering trap, which did happen (2026-11-24).** The migration was staged as
+three pull requests with a manual workflow dispatch required *between* the first
+and the second: PR 1 added a `publish-chain.yml` that seeded the release from
+LFS, and PR 2 **deleted that workflow** as cleanup. All three were merged in one
+sitting without dispatching it. Result: no `chain-latest` release existed, the
+workflow that would have created it was gone from `main`, and the migration job
+— which downloaded the asset it expected to find — had no input.
+
+Two lessons, in order of usefulness:
+
+- **A plan step that lives only in a human's head between two merges will be
+  skipped.** If a sequence needs a manual action between merges, the later PR
+  must fail loudly without it, not quietly assume it happened. Deleting the tool
+  that performs step 1 inside the PR for step 2 removes the ability to recover.
+- **Prefer deriving from a source that cannot go missing.** The fix was to
+  migrate directly from the LFS blob at a **pinned commit** (the parent of the
+  commit that untracked the file) via a second `actions/checkout` with
+  `lfs: true` and `path:`. That needs `.gitattributes` to track the path *at
+  that commit*, which it does — at `main` it does not, which is why hand-rolled
+  `git lfs pull` does not work here. This was also strictly better than the
+  original plan: the 658MB file never became a release asset at all.
+
+It failed safe because `sync()` refuses a release it cannot list rather than
+starting empty. The cost was one night of collection at most, not the archive.
+
 **What to know before changing it:**
+- **Compare dumps, not bytes, across machines.** Two SQLite files holding
+  identical data are byte-identical only within one SQLite version. The runner's
+  3.45.1 and a local 3.50.2 differ in ~7,000 bytes per 9MB partition — page
+  padding and the version field at offset 96 — while every `payload` BLOB and
+  the page count match exactly. Verify with `sqlite3.iterdump()` (or
+  `.dump`), which was identical for all six published files; a `shasum`
+  comparison will report a false mismatch and send you hunting a corruption
+  that is not there.
 - **The index is derived, never the record.** `rebuild_index()` reconstructs it from the partitions, which is why a corrupt 1MB file costs a scan instead of orphaning every chain behind it.
 - **Never call `rebuild_index()` on a partial store.** It derives the index from the partitions *present*, so a CI run holding two months would rebuild an index describing two months — and publishing that over one describing five erases the only record of the rest. `SchwabDatabase` heals an index that is *empty*, never one that is merely partial. This is also why the index file is published rather than regenerated on arrival.
 - **Never let a job start from an empty store.** The fetch step fails loudly, `sync` refuses when it cannot *list* the release (so "could not find out" never resolves to "nothing exists"), and the publish step refuses without a baseline to compare against.

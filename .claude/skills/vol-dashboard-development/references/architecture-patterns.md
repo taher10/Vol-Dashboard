@@ -68,6 +68,48 @@ One side effect worth knowing: this surfaced that Schwab's data has **zero open 
 
 `_strike_profile_snapshot` (`src/api/routes.py:531`) already established that delta/gamma/OI only exist at the individual-contract level and shouldn't be pre-summarized into `bundle.metrics` (which is built by `VolatilityMetrics.compute_all()` and is inherently per-expiration: `term_structure`, `skew`, `skew_ratio`, `curvature`, `vrp` — never per-strike). `_gamma_exposure_row` is the second instance of this same shape: when a new leaderboard needs strike-level greeks, don't add a new key to `VolatilityMetrics.compute_all()` — read `bundle.chain` directly, exactly like `_strike_profile_snapshot` does (same `_live_dte`-based expiration selection, same `_underlying_price` helper, same call/put-matched-by-strike loop). This is a *different* aggregation from the "don't summarize the smile away" caution in that function's own docstring — collapsing the strike curve into one descriptive leaderboard number (total exposure, peak strike) is a legitimate, different use case from plotting the curve itself, and the two coexist fine.
 
+## Writing chains: `append_options_snapshot` takes *collector-shaped* frames
+
+`SchwabDatabase.append_options_snapshot(symbol, snapshot_date, chain)` expects the
+frame **as Schwab's API hands it over**, not the frame `options_snapshot()` gives
+back. It translates through `_OPTIONS_CHAIN_COLUMNS`, which maps collector names
+to stored names — and the dangerous entry is:
+
+```
+collector 'symbol'  ->  stored 'contract_symbol'
+```
+
+In a collector frame, `symbol` is the *contract* (`"SPX   261120C06800000"`). In a
+stored frame, `symbol` is the *underlying* (`"SPX"`) and the contract lives in
+`contract_symbol`. So feeding a canonical frame straight back in writes the
+underlying into the primary key for every row, and it fails with:
+
+```
+sqlite3.IntegrityError: UNIQUE constraint failed:
+    options.symbol, options.snapshot_date, options.contract_symbol
+```
+
+which reads like duplicate contracts in the source data and is nothing of the
+kind. Before chasing it: `chain["contract_symbol"].nunique()` against `len(chain)`
+on the frame you *read* will show no duplicates at all.
+
+To round-trip stored rows back in — re-labelling a session, building fixtures,
+seeding a synthetic store — invert the mapping and **drop the two columns the
+arguments already supply**, or the rename collides into two `symbol` columns and
+pandas raises `ValueError: Buffer has wrong number of dimensions`:
+
+```python
+aliases = {dest: src for src, dest in _OPTIONS_CHAIN_COLUMNS.items()}
+raw = canonical.drop(columns=["symbol", "snapshot_date"]).rename(columns=aliases)
+db.append_options_snapshot("SPX", date(2026, 11, 24), raw)
+```
+
+`src/build_synthetic_db.py` does exactly this (`_CHAIN_ALIASES`, `_as_chain_frame`)
+and is the reference implementation. Two other signature details that produce
+unhelpful errors: `snapshot_date` must be a `datetime.date`, never a string
+(`partition_name` does `.year` on it), and the three arguments are positional —
+passing a frame alone raises `missing 2 required positional arguments`.
+
 ## Anti-fabrication has a *presentation* layer too, not just a math layer
 
 The first three examples in this file are all math-layer: a number was computed wrongly or couldn't honestly be computed at all. There's a second, quieter failure mode worth watching for — the math is scrupulously honest and the **UI throws the honesty away**.
