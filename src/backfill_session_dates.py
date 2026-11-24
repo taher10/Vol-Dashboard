@@ -53,7 +53,7 @@ import argparse
 import shutil
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import date as dateobj, datetime
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -61,6 +61,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.data_quality import market_session_date
+from src.schwab_database import SchwabDatabase, resolve_partition_root
 
 CHAIN_DB = _PROJECT_ROOT / "database" / "schwab_database.db"
 HISTORY_DB = _PROJECT_ROOT / "history" / "vol_history.db"
@@ -72,32 +73,43 @@ def build_mapping(chain_db: Path) -> dict[str, str]:
     Keyed on the latest fetch_time within each snapshot: a run writes its
     symbols over several minutes, and the last of them is still the same
     session as the first.
+
+    fetch_time lives inside the compressed chains rather than in a column
+    that can be aggregated, so this decodes each stored chain to read it.
+    That is a few seconds across a whole archive, and this script runs once
+    in the life of a mislabelling -- not a reason to denormalise a timestamp
+    into the index, where it would have to be kept true forever to answer a
+    question nobody asks twice.
     """
-    with sqlite3.connect(f"file:{chain_db}?mode=ro", uri=True) as conn:
-        rows = conn.execute(
-            "SELECT snapshot_date, MAX(fetch_time) FROM options "
-            "WHERE fetch_time IS NOT NULL GROUP BY snapshot_date ORDER BY snapshot_date"
-        ).fetchall()
+    db = SchwabDatabase(db_path=chain_db)
+    latest: dict[str, str] = {}
+    for symbol, day in _stored_slices(db):
+        chain = db.options_snapshot(symbol, day)
+        if chain.empty or "fetch_time" not in chain.columns:
+            continue
+        fetched = chain["fetch_time"].dropna()
+        if fetched.empty:
+            continue
+        stored = day.isoformat()
+        newest = max(str(v) for v in fetched)
+        if stored not in latest or newest > latest[stored]:
+            latest[stored] = newest
 
     mapping: dict[str, str] = {}
-    for stored, fetched in rows:
+    for stored, fetched in sorted(latest.items()):
         session = market_session_date(datetime.fromisoformat(fetched))
         if str(session) != stored:
             mapping[stored] = str(session)
     return mapping
 
 
-def _conflicts(conn: sqlite3.Connection, source: str, destination: str) -> list[tuple]:
-    """Rows that cannot simply move because the destination already holds
-    that contract for that symbol."""
-    return conn.execute(
-        "SELECT s.symbol, s.contract_symbol FROM options s "
-        "JOIN options d ON d.symbol = s.symbol "
-        "        AND d.contract_symbol = s.contract_symbol "
-        "        AND d.snapshot_date = ? "
-        "WHERE s.snapshot_date = ?",
-        (destination, source),
-    ).fetchall()
+def _stored_slices(db: SchwabDatabase) -> list[tuple[str, dateobj]]:
+    """Every (symbol, date) chain the store holds, oldest first."""
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol, snapshot_date FROM chain_index ORDER BY snapshot_date, symbol"
+        ).fetchall()
+    return [(symbol, dateobj.fromisoformat(day)) for symbol, day in rows]
 
 
 def _relabel(chain_db: Path, history_db: Path | None, mapping: dict[str, str]) -> dict:
@@ -111,26 +123,29 @@ def _relabel(chain_db: Path, history_db: Path | None, mapping: dict[str, str]) -
     you notice 09-29 has already moved to 09-28. A preview that disagrees
     with the apply is worse than no preview, because it teaches you to
     ignore it.
+
+    A collision is now resolved per (symbol, date) rather than per contract,
+    because a chain is stored whole. That is the same rule stated at the
+    granularity the data actually has: a symbol whose destination is already
+    collected keeps the destination's copy, and the misfiled one is dropped
+    entire instead of row by row. The dry run still names every symbol it
+    drops.
     """
     stats = {"moved": 0, "dropped": 0, "history_moved": 0, "details": []}
     ordered = sorted(mapping)  # oldest first: vacates each destination in turn
 
-    with sqlite3.connect(chain_db) as conn:
-        for stored in ordered:
-            destination = mapping[stored]
-            clash = _conflicts(conn, stored, destination)
-            if clash:
-                conn.executemany(
-                    "DELETE FROM options WHERE snapshot_date = ? AND symbol = ? AND contract_symbol = ?",
-                    [(stored, sym, contract) for sym, contract in clash],
-                )
-                stats["dropped"] += len(clash)
-            moved = conn.execute(
-                "UPDATE options SET snapshot_date = ? WHERE snapshot_date = ?", (destination, stored)
-            ).rowcount
-            stats["moved"] += moved
-            stats["details"].append((stored, destination, moved, clash))
-        conn.commit()
+    db = SchwabDatabase(db_path=chain_db)
+    for stored in ordered:
+        destination = mapping[stored]
+        source_day = dateobj.fromisoformat(stored)
+        dest_day = dateobj.fromisoformat(destination)
+        before = {s for s, d in _stored_slices(db) if d == source_day}
+        kept = {s for s, d in _stored_slices(db) if d == dest_day}
+        clash = [(symbol, "(whole chain)") for symbol in sorted(before & kept)]
+        moved = db.relabel_snapshot_date(source_day, dest_day)
+        stats["moved"] += moved
+        stats["dropped"] += len(clash)
+        stats["details"].append((stored, destination, moved, clash))
 
     if history_db is not None and history_db.exists():
         with sqlite3.connect(history_db) as conn:
@@ -151,19 +166,38 @@ def _relabel(chain_db: Path, history_db: Path | None, mapping: dict[str, str]) -
 
 def _report(mapping: dict[str, str], stats: dict, dry_run: bool) -> None:
     print(f"{len(mapping)} snapshot date(s) relabelled:\n")
-    print(f"  {'stored':<12} {'->':<4} {'session':<12} {'rows':>9}  note")
+    print(f"  {'stored':<12} {'->':<4} {'session':<12} {'chains':>9}  note")
     for stored, destination, moved, clash in stats["details"]:
         note = ""
         if clash:
             symbols = sorted({c[0] for c in clash})
-            note = f"merged: {len(clash)} duplicate row(s) dropped ({', '.join(symbols)})"
+            note = f"merged: {len(clash)} duplicate chain(s) dropped ({', '.join(symbols)})"
         print(f"  {stored:<12} {'->':<4} {destination:<12} {moved:>9,}  {note}")
     print()
-    print(f"chain database : {stats['moved']:,} rows relabelled, {stats['dropped']:,} duplicates dropped")
+    print(f"chain database : {stats['moved']:,} chains relabelled, {stats['dropped']:,} duplicate chain(s) dropped")
     print(f"metric history : {stats['history_moved']:,} rows relabelled")
     if dry_run:
         print("\nDRY RUN -- this ran against throwaway copies; your databases are untouched.")
         print("Re-run with --apply to do it for real.")
+
+
+def _copy_store(chain_db: Path, destination: Path) -> float:
+    """Copy a chain store -- index file and monthly partitions -- returning MB.
+
+    Both halves or neither. Copying only the file named on the command line
+    would give the preview an index that lists dates whose chains are not
+    there, and a relabelling that appeared to move nothing.
+    """
+    shutil.copy2(chain_db, destination)
+    total = chain_db.stat().st_size
+    source_root = resolve_partition_root(chain_db)
+    if source_root.is_dir():
+        dest_root = resolve_partition_root(destination)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        for partition in sorted(source_root.glob("*.db")):
+            shutil.copy2(partition, dest_root / partition.name)
+            total += partition.stat().st_size
+    return total / 1e6
 
 
 def dry_run(chain_db: Path, history_db: Path, workdir: Path) -> dict:
@@ -171,8 +205,8 @@ def dry_run(chain_db: Path, history_db: Path, workdir: Path) -> dict:
     workdir.mkdir(parents=True, exist_ok=True)
     chain_copy = workdir / "chain.db"
     history_copy = workdir / "history.db"
-    print(f"copying databases to preview against ({chain_db.stat().st_size / 1e6:.0f} MB) ...")
-    shutil.copy2(chain_db, chain_copy)
+    size = _copy_store(chain_db, chain_copy)
+    print(f"copying databases to preview against ({size:.1f} MB) ...")
     if history_db.exists():
         shutil.copy2(history_db, history_copy)
 
@@ -215,14 +249,18 @@ def main() -> int:
         return 0
 
     print()
-    for path in (args.chain_db, args.history_db):
-        if path.exists():
-            backup = path.with_suffix(path.suffix + ".pre-backfill")
-            shutil.copy2(path, backup)
-            print(f"backed up {path.name} -> {backup.name}")
+    # The chain store's backup has to include its partitions, or the backup
+    # is an index pointing at chains that were relabelled under it.
+    chain_backup = args.chain_db.with_suffix(args.chain_db.suffix + ".pre-backfill")
+    _copy_store(args.chain_db, chain_backup)
+    print(f"backed up {args.chain_db.name} (+ partitions) -> {chain_backup.name}")
+    if args.history_db.exists():
+        history_backup = args.history_db.with_suffix(args.history_db.suffix + ".pre-backfill")
+        shutil.copy2(args.history_db, history_backup)
+        print(f"backed up {args.history_db.name} -> {history_backup.name}")
 
     stats = _relabel(args.chain_db, args.history_db, preview["mapping"])
-    print(f"\napplied: {stats['moved']:,} chain rows, {stats['history_moved']:,} history rows")
+    print(f"\napplied: {stats['moved']:,} chains, {stats['history_moved']:,} history rows")
     print("Re-run without --apply to confirm there is nothing left to do.")
     return 0
 

@@ -205,8 +205,9 @@ class TestChainConsistency:
         assert "disagree" in problems[0]
 
     def test_missing_or_unreadable_chain_db_does_not_fail_the_run(self):
-        """Coverage checking must survive a chain DB that isn't there -- it's
-        LFS-tracked and large, and a missing one is not a data-collection
+        """Coverage checking must survive a chain DB that isn't there. It
+        is a 658MB release asset that most jobs never download, so absent is
+        its normal state almost everywhere -- and not a data-collection
         failure."""
         class Exploding:
             def snapshot_symbol_counts(self, limit=8):
@@ -222,32 +223,83 @@ class TestChainConsistency:
 
 
 class TestChainDbOpening:
-    """database/schwab_database.db is 172MB and LFS-tracked. A checkout
-    without `lfs: true` leaves a ~130-byte pointer at that path, and opening
-    it as SQLite raises "file is not a database" -- which took down the
-    2026-09-15 validation run when the cross-check was added to a workflow
-    that deliberately skips LFS."""
+    """The chain store lives outside the repository as release assets, so a
+    job that did not fetch it finds nothing at that path.
+
+    Telling "nobody fetched it" apart from "nothing was collected" is this
+    function's entire job, and it got harder on 2026-11-22: before the
+    partitions, an absent store meant SchwabDatabase() raised. Now it
+    CREATES the file it is pointed at -- that is how a first run works -- so
+    a missing store would otherwise come back as a valid store describing
+    nothing, and a validator whose job is to shout about missing data would
+    shout every time a job skipped a download it never needed.
+
+    Until 2026-11-22 the equivalent state was an unfetched Git LFS pointer,
+    which SQLite opens and rejects with "file is not a database" -- that took
+    down the 2026-09-15 validation run when the cross-check was added to a
+    workflow deliberately skipping LFS. The pointer bytes are kept below
+    because they are a real thing that was really on disk, and because a
+    half-finished download looks much the same to sqlite3.
+
+    Driven through SCHWAB_DB_PATH rather than by patching the class, so the
+    path resolution these cases turn on is the real one.
+    """
+
+    def test_a_missing_store_is_reported_and_not_created(self, tmp_path, monkeypatch):
+        """The regression this guards. Constructing the store would have made
+        the file, so the check has to come first -- and the absence has to
+        survive being looked at."""
+        absent = tmp_path / "never-fetched" / "schwab_database.db"
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(absent))
+
+        db, reason = open_chain_db()
+
+        assert db is None
+        assert reason is not None and "did not fetch it" in reason
+        assert not absent.exists(), "asking whether it is there must not create it"
 
     def test_lfs_pointer_is_reported_not_raised(self, tmp_path, monkeypatch):
         pointer = tmp_path / "schwab_database.db"
         pointer.write_text(
             "version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 189038592\n"
         )
-        monkeypatch.setattr(
-            "src.validate_collection.SchwabDatabase",
-            lambda *a, **k: SchwabDatabase(db_path=pointer),
-        )
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(pointer))
+
         db, reason = open_chain_db()
+
         assert db is None
         assert reason is not None and "not readable" in reason
 
-    def test_a_real_database_opens_cleanly(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            "src.validate_collection.SchwabDatabase",
-            lambda *a, **k: SchwabDatabase(db_path=tmp_path / "fresh.db"),
-        )
+    def test_an_index_with_no_partitions_is_reported(self, tmp_path, monkeypatch):
+        """A partial fetch: the index file arrived, the chains did not. The
+        index can describe five months while nothing is on disk to read, so
+        this is not something the store itself can detect."""
+        target = tmp_path / "schwab_database.db"
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(target))
+        SchwabDatabase()  # creates the index file, no partitions
+
         db, reason = open_chain_db()
+
+        assert db is None
+        assert reason is not None and "no chain partitions" in reason
+
+    def test_a_real_store_opens_cleanly(self, tmp_path, monkeypatch):
+        import pandas as pd
+
+        target = tmp_path / "schwab_database.db"
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(target))
+        SchwabDatabase().append_options_snapshot("SPX", FRI, pd.DataFrame({
+            "symbol": ["SPX   261218C06900000"],
+            "optionType": ["CALL"],
+            "expiration": ["2026-12-18"],
+            "strikePrice": [6900.0],
+            "fetchTime": ["2026-11-20T21:30:00"],
+        }))
+
+        db, reason = open_chain_db()
+
         assert reason is None and db is not None
+        assert db.snapshot_symbol_counts(limit=1) == [(FRI, 1)]
 
     def test_coverage_still_validates_without_a_chain_db(self):
         """Losing the optional cross-check must not take the real checks with

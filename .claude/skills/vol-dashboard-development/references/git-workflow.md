@@ -10,7 +10,7 @@ Confirmed repeatedly across many sessions — `gh auth status` always fails in t
 
 ## Never stage these
 
-- `database/schwab_database.db`, `history/vol_history.db` — local, regenerable test/dev data from manual pipeline runs. Not project state; committing them just churns the git history with noise (they're real production data only when the automated daily-snapshot GitHub Action commits them itself).
+- `history/vol_history.db` — local, regenerable test/dev data from manual pipeline runs. Not project state; committing it just churns the git history with noise (it's real production data only when the automated daily-snapshot GitHub Action commits it itself). The chain store (`database/schwab_database.db` plus `database/schwab_database_chains/`) is gitignored outright since 2026-11-22 and cannot be staged at all.
 - `src/.vscode/` — personal editor config, not project config.
 
 Never use `git add -A`/`git add .`. Stage files explicitly by name.
@@ -25,11 +25,11 @@ git merge origin/main                                                 # should f
 git stash pop
 ```
 
-If `git stash pop` reports a conflict, it will almost always be on `database/schwab_database.db` and/or `history/vol_history.db` (binary files, can't be text-merged) — resolve by keeping main's committed version and discarding the local stashed one, since local test data was never meant to be preserved:
+If `git stash pop` reports a conflict, it will almost always be on `history/vol_history.db` (a binary file, can't be text-merged) — resolve by keeping main's committed version and discarding the local stashed one, since local test data was never meant to be preserved. The chain store is gitignored and so never appears in a stash at all:
 
 ```bash
-git checkout --ours -- database/schwab_database.db history/vol_history.db
-git add database/schwab_database.db history/vol_history.db
+git checkout --ours -- history/vol_history.db
+git add history/vol_history.db
 ```
 
 Then stage the real code changes explicitly (never these two files) and commit.

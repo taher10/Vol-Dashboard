@@ -92,12 +92,13 @@ class TestCachesAgainstTheData:
 
 class TestFingerprint:
     def test_tracks_both_databases(self, tmp_path, monkeypatch):
-        """Points at temp files rather than the committed ones. The real
-        chain database is an unfetched Git LFS pointer under CI, and the
-        first version of this test constructed a SchwabDatabase to find its
-        path -- which opens it, and failed with "file is not a database".
-        resolve_db_path exists so asking where the data lives never opens
-        it."""
+        """Points at temp files rather than the real ones. The chain
+        database is absent under CI -- it is a release asset nothing in the
+        tests workflow downloads, and before 2026-11-22 it was an unfetched
+        Git LFS pointer. The first version of this test constructed a
+        SchwabDatabase to find its path, which opens the file, and failed
+        with "file is not a database". resolve_db_path exists so asking
+        where the data lives never opens it."""
         chain = tmp_path / "chain.db"
         history = tmp_path / "history.db"
         chain.write_bytes(b"x")
@@ -105,10 +106,66 @@ class TestFingerprint:
         monkeypatch.setenv("SCHWAB_DB_PATH", str(chain))
         monkeypatch.setattr(routes._history_store, "db_path", history)
 
-        chain_mtime, history_mtime = routes._data_fingerprint()
+        chain_mark, history_mtime = routes._data_fingerprint()
 
-        assert chain_mtime == chain.stat().st_mtime
+        assert chain_mark == (("chain.db", chain.stat().st_mtime_ns, 1),)
         assert history_mtime == history.stat().st_mtime
+
+    def test_a_rewritten_partition_changes_the_key(self, tmp_path, monkeypatch):
+        """The whole reason the chain half is not a single mtime.
+
+        Chains live in monthly partitions beside the index file, so
+        re-collecting a date already present rewrites a partition and can
+        leave the index file untouched to the nanosecond. A key that watched
+        only the file SCHWAB_DB_PATH names would go on serving the chain it
+        had already replaced."""
+        chain = tmp_path / "chain.db"
+        chain.write_bytes(b"x")
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(chain))
+        partitions = tmp_path / "chain_chains"
+        partitions.mkdir()
+        partition = partitions / "2026-11.db"
+        partition.write_bytes(b"first")
+
+        index_before = chain.stat().st_mtime_ns
+        before = routes._data_fingerprint()[0]
+        partition.write_bytes(b"second payload")
+        after = routes._data_fingerprint()[0]
+
+        assert before != after
+        # And specifically because of the partition: the index file is the
+        # thing the old key watched, and it has not moved.
+        assert chain.stat().st_mtime_ns == index_before
+
+    def test_a_new_partition_changes_the_key(self, tmp_path, monkeypatch):
+        """A month rolling over adds a file rather than changing one."""
+        chain = tmp_path / "chain.db"
+        chain.write_bytes(b"x")
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(chain))
+        partitions = tmp_path / "chain_chains"
+        partitions.mkdir()
+        (partitions / "2026-11.db").write_bytes(b"november")
+
+        before = routes._data_fingerprint()[0]
+        (partitions / "2026-12.db").write_bytes(b"december")
+
+        assert routes._data_fingerprint()[0] != before
+
+    def test_ignores_files_that_are_not_partitions(self, tmp_path, monkeypatch):
+        """A download leaves temp files beside the real ones, and a stray
+        .db-journal or half-written .download must not look like data."""
+        chain = tmp_path / "chain.db"
+        chain.write_bytes(b"x")
+        monkeypatch.setenv("SCHWAB_DB_PATH", str(chain))
+        partitions = tmp_path / "chain_chains"
+        partitions.mkdir()
+        (partitions / "2026-11.db").write_bytes(b"november")
+
+        before = routes._data_fingerprint()[0]
+        (partitions / "2026-11.db.download").write_bytes(b"half")
+        (partitions / "notes.txt").write_bytes(b"hello")
+
+        assert routes._data_fingerprint()[0] == before
 
     def test_does_not_open_the_database(self, tmp_path, monkeypatch):
         """The regression, pinned: a file that is not valid SQLite -- exactly
@@ -117,14 +174,16 @@ class TestFingerprint:
         pointer.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\n")
         monkeypatch.setenv("SCHWAB_DB_PATH", str(pointer))
 
-        assert routes._data_fingerprint()[0] == pointer.stat().st_mtime
+        assert routes._data_fingerprint()[0] == (
+            ("chain.db", pointer.stat().st_mtime_ns, pointer.stat().st_size),
+        )
 
     def test_missing_file_does_not_raise(self, monkeypatch, tmp_path):
         """A fresh checkout may have neither file yet. The fingerprint has to
         degrade to a constant rather than take the API down."""
         monkeypatch.setenv("SCHWAB_DB_PATH", str(tmp_path / "absent.db"))
 
-        assert routes._data_fingerprint()[0] == 0.0
+        assert routes._data_fingerprint()[0] == (("absent.db", 0, 0),)
 
 
 class TestWrapperPreservesTheFunction:

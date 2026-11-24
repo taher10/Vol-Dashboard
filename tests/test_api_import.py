@@ -1,16 +1,17 @@
 """
-The API must import without a usable chain database.
+The API must import without a usable chain store.
 
-database/schwab_database.db is ~260MB and tracked in Git LFS. The tests
-workflow checks out WITHOUT lfs: true on purpose -- fetching 260MB per run
-would drain the free monthly LFS bandwidth in days -- so in CI that path
-holds a pointer file, roughly 130 bytes of text:
+The chain store is not in the repository. Since 2026-11-22 it is a set of
+release assets that each job fetches if it needs them (see
+src/chain_release.py), and most do not -- so in CI that path usually holds
+NOTHING AT ALL.
 
-    version https://git-lfs.github.com/spec/v1
-    oid sha256:a24ff986...
-    size 257855488
-
-SQLite opens that and raises "file is not a database".
+Before that it was Git LFS-tracked and the tests workflow skipped the
+fetch, so the path held a ~134-byte pointer instead, which SQLite opens and
+rejects with "file is not a database". Both states are exercised below,
+along with plain garbage: what matters is that the API does not care which
+kind of unusable it is, and the absent case is now the common one rather
+than a hypothetical.
 
 routes.py used to build its SchwabDatabase at module scope, so merely
 importing the API ran DDL against that file. Every API test then errored
@@ -18,8 +19,8 @@ during collection, and the failure pointed at sqlite rather than at the
 import, which is a slow thing to diagnose -- it had already cost this
 project two separate incidents before this test existed.
 
-Importing a module should not open a quarter-gigabyte file, let alone
-require one to exist. These tests pin that.
+Importing a module should not open the archive, let alone require it to
+exist. These tests pin that.
 """
 
 import importlib
@@ -33,32 +34,41 @@ _LFS_POINTER = (
 )
 
 
-@pytest.fixture
-def unfetched_lfs_db(tmp_path, monkeypatch, reimported_src):
-    """Point the app at a file shaped exactly like CI's unfetched pointer.
+@pytest.fixture(params=["absent", "lfs-pointer", "garbage"])
+def unusable_chain_db(request, tmp_path, monkeypatch, reimported_src):
+    """Point the app at each way the chain database can fail to be there.
+
+    "absent" is what CI actually looks like now that the file is a release
+    asset nothing in the tests workflow downloads. "lfs-pointer" is the
+    state that produced the two incidents this file was written for, kept
+    because the bytes are a real thing that was really on disk. "garbage"
+    stands in for a truncated or interrupted download.
 
     reimported_src both clears `src.*` so the import below is real and puts
     sys.modules back exactly afterwards; see its docstring for why the
     obvious monkeypatch.delitem loop is not safe here.
     """
-    pointer = tmp_path / "schwab_database.db"
-    pointer.write_text(_LFS_POINTER)
-    monkeypatch.setenv("SCHWAB_DB_PATH", str(pointer))
-    return pointer
+    path = tmp_path / "schwab_database.db"
+    if request.param == "lfs-pointer":
+        path.write_text(_LFS_POINTER)
+    elif request.param == "garbage":
+        path.write_bytes(b"\x00\x01 not a database \xff" * 64)
+    monkeypatch.setenv("SCHWAB_DB_PATH", str(path))
+    return path
 
 
 class TestImportsWithoutADatabase:
-    def test_routes_imports(self, unfetched_lfs_db):
+    def test_routes_imports(self, unusable_chain_db):
         importlib.import_module("src.api.routes")
 
-    def test_app_imports_and_serves_health(self, unfetched_lfs_db):
+    def test_app_imports_and_serves_health(self, unusable_chain_db):
         from fastapi.testclient import TestClient
 
         from src.api.main import app
 
         assert TestClient(app).get("/api/health").status_code == 200
 
-    def test_symbols_served_without_touching_the_database(self, unfetched_lfs_db):
+    def test_symbols_served_without_touching_the_database(self, unusable_chain_db):
         """/api/symbols is registry data. It has no reason to need the chain
         database, and a regression that made it need one would break the
         frontend's first call on every page."""
@@ -71,13 +81,18 @@ class TestImportsWithoutADatabase:
         assert resp.status_code == 200
         assert len(resp.json()) > 0
 
-    def test_the_pointer_really_is_unusable(self, unfetched_lfs_db):
-        """Guards the tests above: if sqlite could open this file they would
-        pass for the wrong reason and stop protecting anything."""
+    def test_the_database_really_is_unusable(self, unusable_chain_db):
+        """Guards the tests above: if sqlite could read contracts out of
+        these they would pass for the wrong reason and protect nothing.
+
+        Note the absent case still has to be driven through a query rather
+        than a connect -- sqlite3.connect() on a missing path cheerfully
+        CREATES an empty database, which is why src/chain_release.py opens
+        everything with mode=ro."""
         import sqlite3
 
         with pytest.raises(sqlite3.DatabaseError):
-            sqlite3.connect(str(unfetched_lfs_db)).execute("SELECT 1 FROM options")
+            sqlite3.connect(str(unusable_chain_db)).execute("SELECT 1 FROM options")
 
 
 class TestDatabaseHandleIsReused:

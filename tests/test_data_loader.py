@@ -4,8 +4,10 @@ Tests for src/dashboard/data_loader.py's snapshot reads.
 These exist because of a defect found on 2026-09-30: the dashboard read
 data/raw/*.csv via CSVStore, but `data/raw/` is gitignored and only a local
 `python -m src.job` run ever writes it. The daily workflow fills
-database/schwab_database.db instead, which IS committed. So the pipeline ran
-green for a week while every page served 2026-09-23 quotes for 23 of the 24
+the chain store instead, which the pipeline publishes (committed via Git LFS
+at the time; compressed monthly partitions on a release since 2026-11-22).
+So the pipeline ran green for a week while every page served 2026-09-23
+quotes for 23 of the 24
 symbols -- the sole exception being SPX, because someone had happened to run
 it locally. Nothing looked broken: the numbers were arithmetically correct,
 just priced off week-old chains.

@@ -7,38 +7,53 @@ name: Daily vol snapshot
 # src/history_store.py's docstring for why a committed SQLite file rather
 # than a hosted database.
 #
-# Also commits database/schwab_database.db -- the raw per-contract options
-# chain and daily close prices (see src/schwab_database.py), populated as a
-# side effect of the same OptionsVolJob.run() call this workflow already
-# makes. This table is much larger than vol_history.db's compact per-expiry
-# metrics (roughly 1,000+ rows/symbol/day vs. ~16) and was growing ~13-14MB/
-# day -- it crossed GitHub's 100MB per-file push limit around 2026-08-14 and
-# started silently failing at the final "Commit history" step (fetch/token
-# steps still succeeded, so this was easy to miss). Tracked via Git LFS
-# (.gitattributes) since 2026-08-20 to fix that; see actions/checkout's
-# `lfs: true` below.
+# The raw per-contract chains and daily closes (see src/schwab_database.py)
+# are NOT committed. They are published as release assets on the fixed tag
+# `chain-latest` -- one small index file plus one compressed partition per
+# calendar month -- and fetched at the start of every run, because the store
+# is append-only and each session is appended to the previous state. See
+# src/chain_release.py.
 #
-# LFS IS THE NEAR-TERM CONSTRAINT -- earlier versions of this comment said
-# twice that it wasn't, and were wrong both times. The figures, so the next
-# reader can see the trend rather than one snapshot:
-#   2026-08-20  assumed 1GB/month, "~10 weeks of runway"  (wrong: it is 10GB
-#               of STORAGE, not a monthly bandwidth tier)
+# This run fetches the two newest partitions, not the archive. It only ever
+# appends to the current month, and two covers the turn of a month where a
+# session's date and the calendar disagree. So a nightly run moves ~30MB
+# whatever year it is, instead of a figure that grows with the project.
+#
+# Why it is not in git, with the figures, so the next reader sees the trend
+# rather than one snapshot:
+#   2026-08-14  crossed GitHub's 100MB per-file push limit; "Commit history"
+#               began failing silently while fetch and token steps passed
+#   2026-08-20  moved to Git LFS, which fixed that
 #   2026-10-15  10GB included, 1.8GB used, 0GB metered    (read as comfort)
 #   2026-11-19  10GB included, 9.01GB used (90%)          (one run of room)
+#   2026-11-22  moved to a release asset; LFS usage frozen
 #
-# What the two optimistic readings both missed: LFS cannot delta-compress a
-# SQLite file, so every push stores a COMPLETE NEW COPY. At 628MB/copy and 58
-# commits touching this file, the quota went to 9GB without the daily growth
-# rate ever changing. Storage is a stock, not a flow -- it does not reset on
-# the 1st, and deleting branches or rewriting history does not reclaim it.
+# What the optimistic readings missed: LFS cannot delta-compress a SQLite
+# file, so every push stored a COMPLETE NEW COPY. At 658MB a copy and 58
+# commits touching this file, the quota reached 9GB without the daily growth
+# rate (12.2MB/session) ever changing. Storage is a stock, not a flow -- it
+# does not reset on the 1st, and deleting branches or rewriting history does
+# not reclaim it. With a $0 LFS budget the overage is refused rather than
+# billed, so the wall at 10GB was `git push` being REJECTED here: data
+# collected, then unsavable.
 #
-# A $0 Git LFS budget means overage is refused rather than billed, so the
-# failure mode at 10GB is `git push` being REJECTED in "Commit history"
-# below -- data collected, then unsavable. The real fix is to stop committing
-# this file and publish it as a release asset instead (release storage is not
-# metered against the LFS quota, and old assets can actually be deleted).
-# Until that lands, assume every run is the one that hits the wall.
+# Release assets are not metered against that quota. A single asset would
+# then have hit the next ceiling -- 2GB per asset, roughly 114 sessions at
+# 12.2MB, about 5.4 months -- which is relocating a wall rather than
+# removing one. So the store was compressed (13.5x, exactly; see
+# src/chain_codec.py) and split by month on the same day, which leaves
+# nothing here with a ceiling that arrives:
+#
+#   per asset   a month's partition is bounded by the length of a month,
+#               ~10MB at 0.9MB/session, against a 2GB limit
+#   asset count twelve a year, against no limit worth planning around
+#   per run     the two newest partitions, ~30MB, flat forever
+#
 # Check github.com/settings/billing/summary before acting on any figure here.
+#
+# history/vol_history.db IS still committed: 2.6MB of compact per-expiry
+# metrics, an ordinary git object, and what every IV Rank and z-score reads.
+#
 # A live pull
 # with no usable quotes (outside market hours) raises LiveDataUnavailableError
 # and neither file gets touched that day -- see src/data_quality.py.
@@ -71,6 +86,17 @@ permissions:
   contents: write # needed to commit history/vol_history.db back to the repo
   issues: write # needed by "Open an issue on failure" below
 
+concurrency:
+  # Two runs racing -- a manual re-run started while the cron fires, most
+  # likely -- would both download the asset, both append their own session
+  # to it, and both upload. The loser's session is then silently gone, and
+  # a collision mid-upload can leave the tag with no asset at all, which
+  # breaks the NEXT run's download. publish-demo.yml has this for the same
+  # reason. Never cancel-in-progress: the run already holding the lock may
+  # be mid-collection, and that session cannot be refetched.
+  group: daily-snapshot
+  cancel-in-progress: false
+
 jobs:
   snapshot:
     # Pinned rather than ubuntu-latest. That label migrates to Ubuntu 26 on
@@ -81,12 +107,9 @@ jobs:
     # still exercised somewhere -- it just fails somewhere harmless first.
     runs-on: ubuntu-24.04
     steps:
-      # lfs: true installs the LFS filters/hooks this checkout needs both to
-      # pull the existing LFS-tracked database/schwab_database.db and to
-      # push new versions of it correctly in the "Commit history" step below.
+      # No lfs: true, and nothing in this repo is LFS-tracked any more. The
+      # chain database arrives from its release asset two steps below.
       - uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - uses: actions/setup-python@v5
         with:
@@ -104,6 +127,37 @@ jobs:
           from src.auth import write_token_from_base64
           write_token_from_base64(os.environ['SCHWAB_TOKEN_B64'])
           "
+
+      # The store is append-only: today's session is appended to the state
+      # the previous run produced, so that state has to be on disk before
+      # collection starts. It arrives as release assets rather than in the
+      # checkout -- see the header.
+      #
+      # Failing loudly when it is missing is the point. Carrying on from an
+      # empty store is the one outcome that destroys history: the job would
+      # collect one session, publish that as the entire archive, and replace
+      # four months Schwab will not serve again. src/chain_release.py refuses
+      # a payload that is not plainly a chain database, refuses to overwrite
+      # a local copy with a smaller one, and refuses to proceed at all when
+      # the release cannot be listed -- "could not find out what exists" and
+      # "nothing exists" must not resolve to the same action.
+      #
+      # --newest 2 rather than everything: see the header. The index file
+      # always comes across, and it is what carries the record of the months
+      # this run did NOT download -- which is why nothing here rebuilds the
+      # index. Rebuilding derives it from the partitions present, so a run
+      # holding two months would rebuild an index describing two months and
+      # publish that over one describing five.
+      #
+      # The baseline is what the publish step compares against. It is written
+      # to a file rather than $GITHUB_ENV because it is per-partition rather
+      # than a single number; if this step does not complete the file is
+      # absent and the publish refuses outright rather than guessing.
+      - name: Fetch the chain store
+        run: |
+          set -euo pipefail
+          python -m src.chain_release sync --newest 2
+          python -m src.chain_release baseline --out "$RUNNER_TEMP/chain-baseline.json"
 
       - name: Run daily snapshot
         env:
@@ -126,7 +180,8 @@ jobs:
       #
       # Nothing downstream of collection can make already-collected data less
       # worth keeping, so nothing downstream of collection gets to block the
-      # commit. A partial day is still better than no day -- "Validate what
+      # commit. The same rule governs "Publish the chain database" below,
+      # which saves the other half of the day's work. A partial day is still better than no day -- "Validate what
       # was collected" below exists to flag it, and the `git diff --staged
       # --quiet ||` guard means a run that collected nothing commits nothing.
       - name: Commit history if it changed
@@ -134,19 +189,95 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add history/vol_history.db database/schwab_database.db
+          git add history/vol_history.db
           git diff --staged --quiet || git commit -m "Daily vol snapshot $(date -u +%F)"
           git push
 
-      # Runs HERE rather than in data-validation.yml because this job already
-      # fetches LFS (it has to, to write the chain DB) and so has the real
-      # ~390MB file on disk. The original reason -- that a second daily fetch
-      # would exhaust a 1GB/month bandwidth tier -- turned out to be wrong
-      # (2026-10-15: 10GB included, 0GB metered). Keeping it here anyway,
-      # because validating the file this job just wrote is the more direct
-      # arrangement regardless of cost. Placed after the commit deliberately:
-      # a validation failure should flag the problem, never discard the day's
-      # data.
+      # if: always(), for exactly the reason the commit above is. This is the
+      # step that saves the day's chains; nothing downstream of collection
+      # gets to block it.
+      #
+      # `check --baseline` compares the store against the state this run
+      # started from and turns the answer into an exit code, so the decision
+      # lives in Python next to the data rather than in shell arithmetic:
+      #
+      #   0  something was collected -> publish
+      #   3  consistent, nothing collected -> leave the release alone. A run
+      #      outside market hours raises LiveDataUnavailableError and writes
+      #      nothing (see src/data_quality.py). Normal, not an error.
+      #   1  something shrank, or the store is inconsistent -> REFUSE. These
+      #      counts only ever grow, so smaller is damage, and uploading it
+      #      would overwrite every session with the wreckage.
+      #
+      # A missing baseline file is the 1 case: without it a store holding
+      # only today's session cannot be told from one holding four months.
+      #
+      # Every local partition is uploaded, not only the month that changed.
+      # The run holds two, so that is ~30MB and needs no guess about which
+      # month a session landed in -- and --clobber on unchanged bytes is a
+      # no-op worth paying for over guessing wrong. --clobber also replaces
+      # in place, which keeps every download URL identical; deleting and
+      # re-creating the release would briefly leave them 404ing, and the next
+      # run fetches those exact URLs for its starting state. Same reasoning
+      # as publish-demo.yml.
+      - name: Publish the chain store
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: chain-latest
+        run: |
+          set -uo pipefail
+          BASELINE="$RUNNER_TEMP/chain-baseline.json"
+          if [ ! -f "$BASELINE" ]; then
+            echo "No baseline: the fetch step did not complete, so the store on disk"
+            echo "cannot be compared against what this run started from. Refusing to publish."
+            exit 1
+          fi
+          python -m src.chain_release check --baseline "$BASELINE" --min-chains 1
+          STATUS=$?
+          case "$STATUS" in
+            0) ;;
+            3) echo "Nothing collected this run. Leaving $TAG untouched."; exit 0 ;;
+            *) exit "$STATUS" ;;
+          esac
+          set -e
+
+          # Copied to its asset name before upload because `gh release
+          # upload` takes the asset's name from the filename -- the `#label`
+          # suffix sets a label, not a name. On disk a partition is
+          # 2026-11.db; on the release it has to be chains-2026-11.db, or
+          # two months of a future year would collide with other assets on
+          # the tag.
+          python -m src.chain_release publishable | while IFS=$'\t' read -r STORE_FILE ASSET; do
+            echo "uploading $STORE_FILE as $ASSET"
+            cp "$STORE_FILE" "$RUNNER_TEMP/$ASSET"
+            gh release upload "$TAG" "$RUNNER_TEMP/$ASSET" --clobber
+          done
+
+          SUMMARY=$(python -m src.chain_release check --min-chains 1)
+          NEWEST=$(python -c "
+          from src.schwab_database import SchwabDatabase
+          rows = SchwabDatabase().snapshot_symbol_counts(limit=1)
+          print(rows[0][0] if rows else 'none')
+          ")
+          gh release edit "$TAG" --notes "Raw per-contract options chains and daily closes collected by .github/workflows/daily-snapshot.yml — through session $NEWEST. $SUMMARY. Updated $(date -u +%Y-%m-%dT%H:%MZ).
+
+          One index file plus one compressed partition per calendar month. Replaced in place after every collection, so these download URLs are stable:
+
+              https://github.com/${{ github.repository }}/releases/download/$TAG/schwab_database.db
+              https://github.com/${{ github.repository }}/releases/download/$TAG/chains-YYYY-MM.db
+
+          Fetch the lot with \`python -m src.chain_release sync\`, which skips months whose published size already matches the local copy.
+
+          Not committed to the repository: Git LFS stores a complete new copy per push, which took the quota to 9.01GB of an included 10GB while the daily growth rate never changed. Release assets are not metered against that quota, and splitting by month means no single asset approaches the 2GB per-asset limit however many years accumulate."
+          echo "published session $NEWEST"
+
+      # Placed after the commit AND the publish deliberately: a validation
+      # failure should flag the problem, never discard or withhold the day's
+      # data. It runs here rather than in data-validation.yml because this
+      # job has the real chain database on disk -- that job deliberately does
+      # not download it, so its raw-chain cross-check reports itself SKIPPED
+      # and runs here instead.
       # --run-created-at carries when the run was CREATED, not when it is
       # executing. For a first attempt those are the same moment; for a
       # re-run they are not, and the difference is the whole check.

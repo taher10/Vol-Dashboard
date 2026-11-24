@@ -25,7 +25,7 @@ import pandas as pd
 from src.data_quality import is_chain_usable
 from src.data_store import CSVStore
 from src.metrics import VolatilityMetrics
-from src.schwab_database import SchwabDatabase
+from src.schwab_database import SchwabDatabase, store_fingerprint
 
 # Metric names we attempt to load, in the order callers can expect keys to
 # appear when present. "vrp" is legitimately absent when no price history was
@@ -96,23 +96,19 @@ def adapt_db_chain(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _db_fingerprint(db: SchwabDatabase) -> float:
-    """Mtime of the chain database, used as a cache key.
+def _db_fingerprint(db: SchwabDatabase) -> tuple:
+    """Cache key for the chain store -- see store_fingerprint().
 
-    The daily workflow commits a new database and `git pull` rewrites the
-    file, so mtime changes exactly when the data does -- including when a
-    pull brings in days collected while this process was running. Cheaper
-    and more honest than a TTL, which would either serve stale data for its
-    duration or re-read constantly.
+    It has to cover the monthly partitions and not just the index file:
+    re-collecting a date already present rewrites a partition and leaves the
+    index row identical, so a key watching one file would keep serving the
+    superseded chain.
     """
-    try:
-        return Path(db.db_path).stat().st_mtime
-    except OSError:
-        return 0.0
+    return store_fingerprint(db.db_path)
 
 
 @lru_cache(maxsize=128)
-def _cached_bundle(save_symbol: str, snapshot_date: date, _fingerprint: float) -> SnapshotBundle:
+def _cached_bundle(save_symbol: str, snapshot_date: date, _fingerprint: tuple) -> SnapshotBundle:
     """Build one symbol's bundle. Cached because the metrics are recomputed
     from the chain on every call (~210ms) and a cross-symbol leaderboard asks
     for all 24 -- uncached that is ~7.6s per request against ~0.3s served

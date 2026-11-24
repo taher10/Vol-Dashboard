@@ -19,6 +19,10 @@ import pytest
 
 from src.dashboard import data_sync
 
+# Captured before the autouse stub below can replace it, so TestRefreshChain
+# can put the real implementation back for the tests that are about it.
+_REAL_REFRESH_CHAIN = data_sync._refresh_chain
+
 
 @pytest.fixture
 def git_calls(monkeypatch):
@@ -35,6 +39,17 @@ def git_calls(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     return calls, scripted
+
+
+@pytest.fixture(autouse=True)
+def _no_real_chain_fetch(monkeypatch):
+    """Keep pull_latest's git logic separable from the asset download.
+
+    pull_latest now does two things -- fast-forward the metric history and
+    fetch the chain database -- and the tests in this file are about the
+    first. _refresh_chain is exercised directly in TestRefreshChain below.
+    """
+    monkeypatch.setattr(data_sync, "_refresh_chain", lambda: data_sync._ChainOutcome(changed=False))
 
 
 def _ok(stdout=""):
@@ -78,22 +93,34 @@ class TestRefusesToClobberLocalData:
     def test_dirty_database_blocks_the_pull(self, git_calls, monkeypatch):
         calls, scripted = git_calls
         monkeypatch.setattr(
-            data_sync, "dirty_tracked_data", lambda: ["database/schwab_database.db"]
+            data_sync, "dirty_tracked_data", lambda: ["history/vol_history.db"]
         )
 
         result = data_sync.pull_latest()
 
         assert result.changed is False
-        assert "schwab_database.db" in result.message
+        assert "vol_history.db" in result.message
         assert not any(c[1] == "pull" for c in calls), "must not pull over local changes"
 
     def test_dirty_detection_reads_porcelain_for_the_data_files(self, git_calls):
         calls, scripted = git_calls
-        scripted[("status", "--porcelain")] = _ok(" M database/schwab_database.db\n")
+        scripted[("status", "--porcelain")] = _ok(" M history/vol_history.db\n")
 
-        assert data_sync.dirty_tracked_data() == ["database/schwab_database.db"]
+        assert data_sync.dirty_tracked_data() == ["history/vol_history.db"]
         status = next(c for c in calls if c[1] == "status")
-        assert "database/schwab_database.db" in status
+        assert "history/vol_history.db" in status
+
+    def test_the_chain_database_is_not_guarded_because_it_is_not_tracked(self):
+        """It left Git LFS for a release asset on 2026-11-22, so git can
+        neither report it dirty nor overwrite it.
+
+        This is not a loosened safeguard. Listing it here was what made the
+        Sync button refuse to run from a checkout whose chain database
+        differed from origin/main at all -- which, on a feature branch, is
+        always. chain_release carries the protection that matters now, by
+        refusing any asset holding fewer rows than the local copy."""
+        assert "database/schwab_database.db" not in data_sync._TRACKED_DATA
+        assert data_sync._TRACKED_DATA == ("history/vol_history.db",)
 
 
 class TestOutcomesAreReportedNotRaised:
@@ -266,7 +293,7 @@ class TestUpstreamStatusAnswers:
         state that made a Sync button appear broken.
         """
         _, scripted = git_calls
-        scripted[("status", "--porcelain")] = _ok(" M database/schwab_database.db\n")
+        scripted[("status", "--porcelain")] = _ok(" M history/vol_history.db\n")
         scripted[("ls-remote", "origin")] = _ok(f"{_REMOTE}\trefs/heads/main\n")
         scripted[("rev-parse", "HEAD")] = _ok(f"{_LOCAL}\n")
         scripted[("cat-file", "-e")] = _ok()
@@ -274,7 +301,7 @@ class TestUpstreamStatusAnswers:
 
         status = data_sync.upstream_status()
 
-        assert status.dirty == ["database/schwab_database.db"]
+        assert status.dirty == ["history/vol_history.db"]
         assert status.has_updates is True
 
 
@@ -358,3 +385,107 @@ class TestUpstreamStatusCaching:
         assert len([c for c in calls if c[1] == "ls-remote"]) == 2, (
             "pull should have invalidated the cached answer"
         )
+
+
+class TestRefreshChain:
+    """The half of a sync that is no longer a git operation.
+
+    The chain database left Git LFS for a release asset on 2026-11-22, so
+    "show me what the pipeline collected" is now a pull plus a download.
+    """
+
+    @pytest.fixture
+    def chain(self, monkeypatch, tmp_path):
+        """The real _refresh_chain, with chain_release.sync() under control.
+
+        The autouse stub in this module replaces _refresh_chain for every
+        other test, which would otherwise shadow the very function this
+        class exists to test -- hence restoring the copy captured at import.
+        """
+        from src import chain_release
+
+        local = tmp_path / "schwab_database.db"
+        monkeypatch.setattr(data_sync, "_refresh_chain", _REAL_REFRESH_CHAIN)
+        monkeypatch.setattr(data_sync, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(data_sync, "_CHAIN_DB", "schwab_database.db")
+        return local, chain_release
+
+    def test_nothing_new_upstream_reports_no_change(self, chain, monkeypatch):
+        """Months that are finished never change again, so a second sync
+        transfers nothing -- which is what makes the button cheap to press."""
+        local, chain_release = chain
+        monkeypatch.setattr(
+            chain_release, "sync",
+            lambda *a, **k: {"index": 7, "downloaded": [], "skipped": ["2026-11"], "months": ["2026-11"]},
+        )
+
+        assert data_sync._refresh_chain() == data_sync._ChainOutcome(changed=False)
+
+    def test_a_downloaded_month_reports_a_change(self, chain, monkeypatch):
+        local, chain_release = chain
+        monkeypatch.setattr(
+            chain_release, "sync",
+            lambda *a, **k: {"index": 7, "downloaded": [("2026-11", 24)], "skipped": [], "months": ["2026-11"]},
+        )
+
+        assert data_sync._refresh_chain().changed is True
+
+    def test_a_success_adds_no_note(self, chain, monkeypatch):
+        """`note` is rendered as "Synced the metric history, but {note}", so
+        putting good news in it would produce a sentence that reads as a
+        partial failure."""
+        local, chain_release = chain
+        monkeypatch.setattr(
+            chain_release, "sync",
+            lambda *a, **k: {"index": 7, "downloaded": [("2026-11", 24)], "skipped": [], "months": ["2026-11"]},
+        )
+
+        assert data_sync._refresh_chain().note is None
+
+    def test_it_asks_for_every_month_not_just_the_recent_ones(self, chain, monkeypatch):
+        """The dashboard can be asked for any date in the archive. A
+        developer who synced only the current month would get an empty
+        surface for last August with no indication why -- `newest` is for
+        the nightly job, which only appends to the current month."""
+        local, chain_release = chain
+        seen = {}
+
+        def record(db_path=None, **kwargs):
+            seen.update(kwargs)
+            seen["db_path"] = db_path
+            return {"index": 1, "downloaded": [], "skipped": [], "months": []}
+
+        monkeypatch.setattr(chain_release, "sync", record)
+        data_sync._refresh_chain()
+
+        assert seen.get("newest") is None
+        assert seen.get("months") is None
+        assert Path(seen["db_path"]).name == "schwab_database.db"
+
+    def test_a_failed_sync_is_reported_not_raised(self, chain, monkeypatch):
+        """The history pull may well have succeeded. "Most of your data
+        arrived" is a different message from "sync failed"."""
+        local, chain_release = chain
+
+        def boom(*a, **k):
+            raise chain_release.ChainDownloadError("404, no asset on that tag")
+
+        monkeypatch.setattr(chain_release, "sync", boom)
+
+        outcome = data_sync._refresh_chain()
+
+        assert outcome.changed is False
+        assert "404" in outcome.note
+
+    def test_pull_latest_surfaces_the_chain_failure(self, git_calls, monkeypatch):
+        """A sync that moved the history but not the chain must not read as
+        an unqualified success."""
+        _, scripted = git_calls
+        scripted[("rev-parse", "--short")] = _ok("abc1234\n")
+        monkeypatch.setattr(
+            data_sync,
+            "_refresh_chain",
+            lambda: data_sync._ChainOutcome(changed=False, note="the chain store did not update (404)"),
+        )
+
+        assert "404" in data_sync.pull_latest().message

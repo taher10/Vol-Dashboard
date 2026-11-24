@@ -30,6 +30,9 @@ here, applied once per session and immune to module reloading:
     reaching a broker: besides the data damage, Schwab rotates the refresh
     token on every use, so one stray call can invalidate the credential CI
     depends on and stop the next day's collection.
+  * chain_release's release API and default asset URLs are pointed
+    somewhere unreachable, so no test can reach GitHub over the real
+    network -- see _no_chain_downloads_over_the_network below.
 """
 
 from __future__ import annotations
@@ -51,6 +54,39 @@ def _never_touch_the_committed_databases(tmp_path_factory):
     os.environ["SCHWAB_DB_PATH"] = str(sandbox / "schwab_database.db")
     yield
     os.environ.pop("SCHWAB_DB_PATH", None)
+
+
+_UNREACHABLE = "file:///nonexistent/tests-must-pass-an-explicit-url"
+
+
+@pytest.fixture(autouse=True)
+def _no_chain_downloads_over_the_network(monkeypatch):
+    """Point every default GitHub URL in chain_release somewhere unreachable.
+
+    Added when src/dashboard/data_sync.py started fetching the chain
+    database from a GitHub release instead of pulling it through Git LFS.
+    The first run of the sync tests after that change made a real HTTPS
+    request to github.com and would have written the response over
+    database/schwab_database.db had the asset existed -- the same shape of
+    accident as the 2026-10-21 overwrite described above, arriving by a new
+    route.
+
+    Both entry points, because a sync is now two calls: one to the release
+    API to learn which months exist, and one download per month. Blocking
+    only the second would let a test suite poll api.github.com on every run
+    -- unauthenticated, 60 requests an hour, shared CI addresses -- and make
+    the suite fail for reasons that have nothing to do with the code.
+
+    Patching the URLs rather than the functions keeps tests that pass an
+    explicit url= working, which is how tests/test_chain_release.py drives
+    the real download logic against local files.
+    """
+    import src.chain_release as chain_release
+
+    monkeypatch.setattr(chain_release, "_RELEASE_API", f"{_UNREACHABLE}/releases.json")
+    monkeypatch.setattr(
+        chain_release, "asset_url", lambda name: f"{_UNREACHABLE}/{name}"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +156,7 @@ def reimported_src():
     """Force a genuine reimport of `src.*`, then restore sys.modules exactly.
 
     Several tests need the application imported from scratch -- to prove it
-    boots with an unfetched LFS pointer for a database, or without schwab-py
+    boots with no usable chain database at that path, or without schwab-py
     installed. Evicting the modules with monkeypatch.delitem looks like it
     covers that, but it leaks: delitem restores the keys it removed, while the
     reimport *adds* `src.*` entries that were not in sys.modules beforehand,

@@ -23,12 +23,13 @@ class TestDatabasePathResolution:
     def test_defaults_to_the_committed_database(self, tmp_path, monkeypatch):
         """The default is patched to a temp path rather than exercised for
         real. Constructing against the actual default opens
-        database/schwab_database.db, which under CI is a Git LFS pointer (the
-        test workflow does not fetch LFS, deliberately -- 172MB per run would
-        drain the monthly quota). Opening a pointer raises "file is not a
+        database/schwab_database.db, which under CI is simply ABSENT -- it
+        is a release asset the tests workflow has no reason to download
+        (see src/chain_release.py). Before 2026-11-22 it was an unfetched
+        Git LFS pointer instead, and opening that raised "file is not a
         database", which is how this very file broke the tests workflow on
-        2026-09-22. A unit test has no business touching a 172MB tracked
-        file anyway."""
+        2026-09-22. Either way a unit test has no business reaching for a
+        658MB file to find out where a path points."""
         monkeypatch.delenv("SCHWAB_DB_PATH", raising=False)
         fake_default = tmp_path / "schwab_database.db"
         monkeypatch.setattr("src.schwab_database._DEFAULT_DB_PATH", fake_default)

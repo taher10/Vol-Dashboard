@@ -41,7 +41,7 @@ from src.dashboard import data_trust as data_trust_report
 from src.dashboard import vol_surface
 from src.dashboard.data_loader import SnapshotBundle
 from src.history_store import HistoryStore
-from src.schwab_database import SchwabDatabase, resolve_db_path
+from src.schwab_database import SchwabDatabase, store_fingerprint
 from src.symbols import SYMBOL_REGISTRY
 
 from .demo import block_in_demo
@@ -209,26 +209,29 @@ def list_symbols() -> list[SymbolOut]:
 # ---------------------------------------------------------------------------
 
 
-def _data_fingerprint() -> tuple[float, float]:
-    """Modification times of the two databases every leaderboard reads.
+def _data_fingerprint() -> tuple[tuple, float]:
+    """The state of the two stores every leaderboard reads.
 
-    Used as a cache key so a changed file evicts the rows derived from it:
-    the chain database arrives with each `git pull`, and the metric history
-    is rewritten by the same commit. Cheaper and more honest than a TTL,
-    which would either serve stale rows for its duration or expire rows that
-    are still perfectly good.
+    Used as a cache key so changed data evicts the rows derived from it: the
+    chains are republished each session and the metric history is rewritten
+    by the same run. Cheaper and more honest than a TTL, which would either
+    serve stale rows for its duration or expire rows that are still
+    perfectly good.
+
+    The chain half is store_fingerprint(), which covers the monthly
+    partitions as well as the index file -- watching one path would miss a
+    re-collected date, which rewrites a partition without changing the index
+    row. The history half is a plain mtime because it is still one file.
+
+    Neither branch constructs a SchwabDatabase. Under CI that file was once
+    an unfetched LFS pointer, so asking a cache where its data lives was
+    enough to fail the suite with "file is not a database".
     """
-    def mtime(path) -> float:
-        try:
-            return Path(path).stat().st_mtime
-        except OSError:
-            return 0.0
-
-    # resolve_db_path rather than _db().db_path: the latter constructs a
-    # SchwabDatabase, which opens the file and runs DDL. Under CI that file
-    # is an unfetched LFS pointer, so asking a cache where its data lives
-    # was enough to fail the suite with "file is not a database".
-    return mtime(resolve_db_path()), mtime(_history_store.db_path)
+    try:
+        history = Path(_history_store.db_path).stat().st_mtime
+    except OSError:
+        history = 0.0
+    return store_fingerprint(), history
 
 
 def _data_cached(fn):
@@ -1458,12 +1461,12 @@ def _db() -> SchwabDatabase:
 
     This was a module-level `_schwab_db = SchwabDatabase()`, which meant
     importing this module opened database/schwab_database.db and executed
-    DDL against it. In CI that file is an unfetched Git LFS pointer (the
-    tests workflow deliberately does not fetch LFS -- 260MB per run would
-    drain the monthly quota), so `import src.api.routes` raised
-    "file is not a database" and every API test errored during collection.
-    Importing a module should not open a quarter-gigabyte file, let alone
-    require one to exist.
+    DDL against it. In CI that file is not there at all -- it is a 658MB
+    release asset the tests workflow has no reason to download (see
+    src/chain_release.py), and before 2026-11-22 it was an unfetched Git
+    LFS pointer -- so `import src.api.routes` raised "file is not a
+    database" and every API test errored during collection. Importing a
+    module should not open a 658MB file, let alone require one to exist.
     """
     return _db_at(os.environ.get("SCHWAB_DB_PATH"))
 

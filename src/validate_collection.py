@@ -46,7 +46,7 @@ from datetime import date, datetime, timedelta
 from src.dashboard import data_trust
 from src.data_quality import market_session_date
 from src.history_store import HistoryStore
-from src.schwab_database import SchwabDatabase
+from src.schwab_database import SchwabDatabase, resolve_db_path
 from src.symbols import SYMBOL_REGISTRY
 
 
@@ -136,28 +136,55 @@ def _depth_problems(symbol: str, stats: list[dict], thin_fraction: float) -> lis
 
 
 def open_chain_db() -> tuple["SchwabDatabase | None", str | None]:
-    """Open the raw chain database, or explain why it couldn't be.
+    """Open the raw chain store, or explain why it couldn't be.
 
-    database/schwab_database.db is ~390MB and Git LFS-tracked. A checkout
-    without `lfs: true` leaves a ~130-byte pointer file at that path, and
-    opening it raises `sqlite3.DatabaseError: file is not a database` -- which
-    is exactly how the 2026-09-15 validation run died once this cross-check
-    was added to a workflow that deliberately skips LFS.
+    The store is not in the repository at all -- it is published as release
+    assets and fetched by whichever job needs it (see src/chain_release.py).
+    Most jobs do not: there is no reason to pull an archive a job never
+    opens. So this cross-check runs where the store is already on disk (the
+    snapshot job, which fetches it to append to) and reports itself skipped
+    everywhere else.
 
-    Pulling LFS on a daily job isn't the answer either -- not for the cost
-    (the billing page on 2026-10-15 showed 10GB included and 0GB metered,
-    so the 1GB/month figure this once cited was simply wrong) but because
-    there is no reason to download ~390MB a job never opens. So
-    the cross-check runs where the file already exists (the snapshot job,
-    which must fetch LFS to write it) and reports itself skipped elsewhere.
+    "Absent" has to be detected before anything is constructed, which is
+    why this checks the paths itself. SchwabDatabase() CREATES the file it
+    is pointed at -- that is how a first run works -- so letting it run
+    against a missing store would hand back a perfectly valid store
+    describing nothing, and this function's whole job is to tell "nobody
+    fetched it" apart from "nothing was collected". The second is an alarm.
+    The first is Tuesday.
+
+    Until 2026-11-22 the file was Git LFS-tracked and the failure looked
+    different again: a checkout without `lfs: true` left a ~134-byte
+    pointer at that path and opening it raised `sqlite3.DatabaseError: file
+    is not a database`, which is how the 2026-09-15 validation run died
+    once this cross-check was added to a workflow that deliberately skipped
+    LFS. That path is still covered -- a truncated download looks much the
+    same to sqlite3.
+
     Returns (db, None) on success, (None, reason) otherwise.
     """
     try:
-        return SchwabDatabase(), None
+        path = resolve_db_path()
+        if not path.exists():
+            return None, (
+                f"raw chain store is not at {path} -- it is a release asset, so this "
+                "is most likely a job that did not fetch it"
+            )
+        db = SchwabDatabase()
+        if not db.partition_paths():
+            return None, (
+                f"the index file at {path} is readable but no chain partitions are "
+                f"beside it in {db.partition_root} -- a partial fetch, so the chains "
+                "cannot be cross-checked"
+            )
+        return db, None
     except sqlite3.DatabaseError as exc:
-        return None, f"raw chain database is not readable ({exc}) -- likely an LFS pointer from a no-LFS checkout"
+        return None, (
+            f"raw chain store is not readable ({exc}) -- most likely a truncated or "
+            "partial download"
+        )
     except Exception as exc:  # noqa: BLE001 -- never let an optional input fail the coverage check
-        return None, f"raw chain database unavailable ({type(exc).__name__}: {exc})"
+        return None, f"raw chain store unavailable ({type(exc).__name__}: {exc})"
 
 
 def _chain_consistency_problems(
