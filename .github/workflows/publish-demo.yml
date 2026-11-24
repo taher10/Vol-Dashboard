@@ -67,9 +67,9 @@ jobs:
       # ~134-byte text file that SQLite rejects with "file is not a
       # database". The generator reads nothing, so this workflow touches
       # neither the asset nor any real quotes.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 

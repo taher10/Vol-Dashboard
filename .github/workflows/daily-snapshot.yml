@@ -109,9 +109,9 @@ jobs:
     steps:
       # No lfs: true, and nothing in this repo is LFS-tracked any more. The
       # chain database arrives from its release asset two steps below.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
