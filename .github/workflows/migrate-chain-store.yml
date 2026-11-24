@@ -1,15 +1,34 @@
 name: Migrate the chain store to monthly partitions
 
 # ONE-OFF. Run it once from the Actions tab, confirm the output, then delete
-# this file. It converts the published single-table chain database into the
+# this file. It converts the archived single-table chain database into the
 # compressed monthly partitions src/schwab_database.py now reads, and
-# publishes them alongside it.
+# publishes them to the chain-latest release.
+#
+# Where the input comes from
+# --------------------------
+# Git LFS, at the last commit that still tracked the file. The original plan
+# was to seed a 658MB `schwab_database.db` asset first and migrate from that,
+# but the three partition pull requests were merged before the seed workflow
+# was ever dispatched -- and the second of them deleted that workflow. So no
+# chain-latest release exists, and git history is now the only copy.
+#
+# That turns out to be the better arrangement: the 658MB file never has to
+# become a release asset at all. It goes straight from LFS to ~52MB of
+# partitions, and the intermediate upload that would have cost a third of the
+# per-asset ceiling simply does not happen.
+#
+# LFS_SOURCE is pinned to a commit, not a branch. It is the parent of the
+# commit that untracked the file, and the pointer there is
+# oid sha256:a7a6fc51...36e8, size 658022400 -- verified byte-for-byte
+# against the working copy before that copy was retired.
 #
 # Why this runs here and not on a laptop
 # --------------------------------------
-# The input is a 658MB release asset and the output is ~52MB of new assets.
-# Doing it on the runner means GitHub's own network carries both legs, and
-# `gh` is authenticated here by github.token with no credential to create.
+# GitHub's own network carries both legs -- the LFS download in and the asset
+# uploads out -- and `gh` is authenticated here by github.token with no
+# credential to create. The download spends LFS *bandwidth*, which is
+# separate from the storage quota this whole change exists to stop growing.
 #
 # Why it is manual
 # ----------------
@@ -21,20 +40,20 @@ name: Migrate the chain store to monthly partitions
 #
 # What it does NOT do
 # -------------------
-# It does not delete, truncate or replace the existing `schwab_database.db`
-# asset's chains. The migrated index file published at the end still carries
-# the original `options` table, because the whole file is republished with
-# chain_index added to it rather than rebuilt from scratch. So the state
-# before this ran stays downloadable from the same URL, and the rollback is
-# to ignore the partitions.
+# It does not delete or overwrite anything that exists today, because
+# nothing does: chain-latest has no assets until this job creates them. And
+# it cannot damage its own source -- src/migrate_to_partitions.py opens the
+# legacy file `mode=ro` and never writes to it. The rollback is the LFS
+# object at LFS_SOURCE, which stays in history permanently whatever this
+# job does.
 #
 # Ordering
 # --------
-# daily-snapshot.yml refuses to run against an unmigrated release -- see
-# _is_pre_migration in src/chain_release.py -- so if the nightly fires before
-# this does, it fails loudly rather than publishing an index that describes
-# one day over one that describes four months. Running this fixes that; no
-# data is at risk in the meantime.
+# Until this runs, daily-snapshot.yml fails at its `Fetch the chain store`
+# step -- sync() refuses a release it cannot list rather than starting from
+# an empty database ("Refusing to guess what to download"). That costs a
+# night's collection if it fires first, but it cannot publish a one-day
+# index over a four-month one. Running this fixes it.
 
 on:
   workflow_dispatch: {}
@@ -50,11 +69,30 @@ concurrency:
 permissions:
   contents: write
 
+env:
+  # Parent of 95a3d2c, the commit that untracked database/schwab_database.db.
+  LFS_SOURCE: 518c35387f490126f6cdbec6e626a191c8a2c376
+  TAG: chain-latest
+
 jobs:
   migrate:
     runs-on: ubuntu-24.04
     steps:
+      # The code to migrate with: current main, where the chain database is
+      # untracked, so this checkout pulls no LFS object.
       - uses: actions/checkout@v4
+
+      # The data to migrate: a second checkout pinned to the commit that
+      # still tracked the file. .gitattributes exists at that commit and
+      # tracks this path, so `lfs: true` smudges the real 658MB file rather
+      # than leaving a 130-byte pointer. Doing it as a checkout avoids
+      # hand-rolled `git lfs pull` plumbing, which would have to contend
+      # with .gitattributes being absent at main.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.LFS_SOURCE }}
+          lfs: true
+          path: legacy-src
 
       - uses: actions/setup-python@v5
         with:
@@ -63,28 +101,26 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Fetched with curl rather than through src.chain_release, because that
-      # module now refuses a pre-migration asset by design -- which is the
-      # point of this job's existence. --fail turns a 404 into a non-zero
-      # exit instead of an HTML file named schwab_database.db.
-      - name: Download the published database
-        env:
-          TAG: chain-latest
+      # A pointer file is ~130 bytes and SQLite would reject it, but the
+      # error would come from deep inside the migration. Checking the size
+      # and the row count here says plainly which of the two went wrong.
+      - name: Check the legacy database is the archive
         run: |
           set -euo pipefail
-          mkdir -p legacy
-          curl --fail --location --silent --show-error \
-            --output legacy/schwab_database.db \
-            "https://github.com/${{ github.repository }}/releases/download/$TAG/schwab_database.db"
-          ls -l legacy/schwab_database.db
+          LEGACY=legacy-src/database/schwab_database.db
+          ls -l "$LEGACY"
+          if [ "$(wc -c < "$LEGACY")" -lt 100000000 ]; then
+            echo "::error::$LEGACY is too small to be the archive -- LFS smudge probably did not run."
+            exit 1
+          fi
           python - <<'PY'
           import sqlite3
-          c = sqlite3.connect("file:legacy/schwab_database.db?mode=ro", uri=True)
+          c = sqlite3.connect("file:legacy-src/database/schwab_database.db?mode=ro", uri=True)
           rows = c.execute("SELECT COUNT(*) FROM options").fetchone()[0]
-          slices = c.execute("SELECT COUNT(*) FROM (SELECT DISTINCT symbol, snapshot_date FROM options)").fetchone()[0]
+          chains = c.execute("SELECT COUNT(*) FROM (SELECT DISTINCT symbol, snapshot_date FROM options)").fetchone()[0]
           span = c.execute("SELECT MIN(snapshot_date), MAX(snapshot_date) FROM options").fetchone()
           prices = c.execute("SELECT COUNT(*) FROM stock_prices").fetchone()[0]
-          print(f"{rows:,} contract rows, {slices:,} chains, {span[0]} -> {span[1]}, {prices:,} price rows")
+          print(f"{rows:,} contract rows, {chains:,} chains, {span[0]} -> {span[1]}, {prices:,} price rows")
           if rows < 1_000_000:
               raise SystemExit(f"Only {rows:,} rows -- that is not the archive. Stopping.")
           PY
@@ -98,28 +134,46 @@ jobs:
       # Exactness rather than closeness because this is the only copy: a
       # JSON round-trip returns 0.30000000000000004 for a stored 0.3, and
       # "near enough" is not a property you can restore later.
+      #
+      # database/ is gitignored and so is not in the checkout; sqlite3 will
+      # not create a missing parent directory.
       - name: Migrate and verify every chain
         run: |
           set -euo pipefail
+          mkdir -p database
           python -m src.migrate_to_partitions \
-            --source legacy/schwab_database.db \
+            --source legacy-src/database/schwab_database.db \
             --destination database/schwab_database.db
 
       # Published only after the verification above exited 0. The index file
-      # goes last: until it is there, a reader fetching partitions finds no
-      # index describing them, which src/schwab_database.py heals by
-      # rebuilding. The reverse order would leave a window where the index
+      # goes last: until it is there, sync() refuses the release outright, so
+      # a reader that arrives mid-upload backs off instead of accepting a
+      # partial store. The reverse order would leave a window where the index
       # promises months whose partitions have not arrived.
       - name: Publish the partitions
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: chain-latest
         run: |
           set -euo pipefail
           python -m src.chain_release check --min-chains 1000
 
-          python -m src.chain_release publishable | tail -n +2 \
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Creating the $TAG release."
+            gh release create "$TAG" \
+              --title "Chain store (latest)" \
+              --notes "Compressed monthly partitions of the option-chain archive, republished by daily-snapshot.yml. Not a source release."
+          fi
+
+          # Skipped by name, not by position. `publishable` happens to list
+          # the index first, so `tail -n +2` would work today -- and would
+          # silently drop a partition instead the day that ordering changes.
+          INDEX_ASSET=$(python -c 'from src.chain_release import INDEX_ASSET; print(INDEX_ASSET)')
+
+          python -m src.chain_release publishable \
             | while IFS=$'\t' read -r STORE_FILE ASSET; do
+            if [ "$ASSET" = "$INDEX_ASSET" ]; then
+              continue
+            fi
             echo "uploading $STORE_FILE as $ASSET"
             cp "$STORE_FILE" "$RUNNER_TEMP/$ASSET"
             gh release upload "$TAG" "$RUNNER_TEMP/$ASSET" --clobber
