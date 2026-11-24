@@ -359,9 +359,10 @@ def sync(
         raise ChainDownloadError(
             f"The published {INDEX_ASSET} is the pre-migration single-table "
             "database -- it still carries an `options` table and there are no "
-            "chain partitions beside it. Run the one-off "
-            ".github/workflows/migrate-chain-store.yml before anything relies "
-            "on this. Refusing to continue: a run that collected into this "
+            "chain partitions beside it. Convert it with `python -m "
+            "src.migrate_to_partitions` before anything relies on this; the "
+            "one-off workflow that did it in CI has served its purpose and "
+            "been deleted. Refusing to continue: a run that collected into this "
             "would publish an index describing only today over a release that "
             "describes four months."
         )
