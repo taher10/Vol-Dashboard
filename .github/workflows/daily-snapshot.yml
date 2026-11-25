@@ -248,11 +248,41 @@ jobs:
           # 2026-11.db; on the release it has to be chains-2026-11.db, or
           # two months of a future year would collide with other assets on
           # the tag.
-          python -m src.chain_release publishable | while IFS=$'\t' read -r STORE_FILE ASSET; do
+          # Partitions first, index last, and never the other way round.
+          # The index is what tells a reader a chain exists. Publishing it
+          # before the partition holding that chain opens a window where the
+          # release promises a snapshot whose payload has not arrived, and a
+          # reader landing in it gets an empty frame for a chain the index
+          # says is there -- a wrong answer rather than a missing one.
+          # Reversed, the window is invisible: the old index simply does not
+          # mention the new chain yet.
+          #
+          # Skipped by name, not by position. `publishable` lists the index
+          # first today, so dropping line 1 would work -- and would silently
+          # drop a partition the day that ordering changes.
+          # One listing drives both passes, so the index uploaded last is
+          # the same file the loop deliberately skipped.
+          INDEX_ASSET=$(python -c 'from src.chain_release import INDEX_ASSET; print(INDEX_ASSET)')
+          PUBLISHABLE=$(python -m src.chain_release publishable)
+
+          printf '%s\n' "$PUBLISHABLE" | while IFS=$'\t' read -r STORE_FILE ASSET; do
+            if [ "$ASSET" = "$INDEX_ASSET" ]; then
+              continue
+            fi
             echo "uploading $STORE_FILE as $ASSET"
             cp "$STORE_FILE" "$RUNNER_TEMP/$ASSET"
             gh release upload "$TAG" "$RUNNER_TEMP/$ASSET" --clobber
           done
+
+          INDEX_FILE=$(printf '%s\n' "$PUBLISHABLE" \
+            | awk -F'\t' -v want="$INDEX_ASSET" '$2 == want { print $1; exit }')
+          if [ -z "$INDEX_FILE" ]; then
+            echo "::error::$INDEX_ASSET is not in the publishable set -- refusing to leave the release without an index."
+            exit 1
+          fi
+          echo "uploading $INDEX_FILE as $INDEX_ASSET (last)"
+          cp "$INDEX_FILE" "$RUNNER_TEMP/$INDEX_ASSET"
+          gh release upload "$TAG" "$RUNNER_TEMP/$INDEX_ASSET" --clobber
 
           SUMMARY=$(python -m src.chain_release check --min-chains 1)
           NEWEST=$(python -c "
